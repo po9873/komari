@@ -1,4 +1,4 @@
-name: Build komari-all-in-one when upstream updates
+name: Build komari image when upstream updates
 
 on:
   push:
@@ -17,10 +17,11 @@ jobs:
       changed: ${{ steps.diff.outputs.changed }}
       komari: ${{ steps.up.outputs.komari }}
       cloudflared: ${{ steps.up.outputs.cloudflared }}
+      nginx: ${{ steps.ng.outputs.nginx }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: 查上游最新版本
+      - name: 查 komari / cloudflared 最新 release
         id: up
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -31,19 +32,35 @@ jobs:
               https://api.github.com/repos/cloudflare/cloudflared/releases/latest | jq -r '.tag_name // empty')
           echo "komari=${K:-unknown}"       >> "$GITHUB_OUTPUT"
           echo "cloudflared=${C:-unknown}"  >> "$GITHUB_OUTPUT"
+          echo "komari=$K  cloudflared=$C"
+
+      - name: 查 nginx（跟随基础镜像的 alpine 源，不写死版本）
+        id: ng
+        run: |
+          IMG=ghcr.io/komari-monitor/komari:latest
+          docker pull -q "$IMG"
+          ALP=$(docker run --rm --entrypoint cat "$IMG" /etc/alpine-release 2>/dev/null | head -1)
+          V=$(timeout 180 docker run --rm --entrypoint sh "$IMG" -c \
+                'apk update >/dev/null 2>&1; apk search -x -q nginx | head -1' 2>/dev/null \
+              | sed -n 's/^nginx-\(.*\)$/\1/p' | head -1)
+          echo "alpine=${ALP:-unknown}  nginx=${V:-unknown}"
+          echo "nginx=${V:-unknown}" >> "$GITHUB_OUTPUT"
 
       - name: 与上次构建记录比对
         id: diff
         run: |
           if [ -f versions.lock ]; then . ./versions.lock; fi
-          echo "上游 : komari=${{ steps.up.outputs.komari }} cloudflared=${{ steps.up.outputs.cloudflared }}"
-          echo "上次 : komari=${LOCK_KOMARI:-none} cloudflared=${LOCK_CLOUDFLARED:-none}"
-          if [ "${{ steps.up.outputs.komari }}" != "${LOCK_KOMARI:-}" ] || \
-             [ "${{ steps.up.outputs.cloudflared }}" != "${LOCK_CLOUDFLARED:-}" ]; then
-            echo "changed=true"  >> "$GITHUB_OUTPUT"
-          else
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          fi
+          K="${{ steps.up.outputs.komari }}"
+          C="${{ steps.up.outputs.cloudflared }}"
+          N="${{ steps.ng.outputs.nginx }}"
+          echo "上游: komari=$K cloudflared=$C nginx=$N"
+          echo "上次: komari=${LOCK_KOMARI:-none} cloudflared=${LOCK_CLOUDFLARED:-none} nginx=${LOCK_NGINX:-none}"
+          CHANGED=false
+          if [ "$K" != "${LOCK_KOMARI:-}" ]; then echo "komari 变了"; CHANGED=true; fi
+          if [ "$C" != "${LOCK_CLOUDFLARED:-}" ]; then echo "cloudflared 变了"; CHANGED=true; fi
+          # nginx 查不到（unknown）时不触发，避免网络抖动造成误判
+          if [ "$N" != "unknown" ] && [ "$N" != "${LOCK_NGINX:-}" ]; then echo "nginx 变了"; CHANGED=true; fi
+          echo "changed=$CHANGED" >> "$GITHUB_OUTPUT"
 
   build:
     needs: check
@@ -57,6 +74,7 @@ jobs:
       # Docker Hub 凭证来自仓库 Secrets：Settings → Secrets and variables → Actions
       DH_USER: ${{ secrets.DOCKERHUB_USERNAME }}
       DH_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -108,10 +126,23 @@ jobs:
           tags: ${{ steps.tags.outputs.tags }}
 
       - name: 记录本次上游版本（防止下次重复构建）
-        if: github.event_name == 'schedule'
         run: |
-          printf 'LOCK_KOMARI=%s\nLOCK_CLOUDFLARED=%s\n' \
-            "${{ needs.check.outputs.komari }}" "${{ needs.check.outputs.cloudflared }}" > versions.lock
+          # push / 手动构建时 check 被跳过，这里自己查一遍 komari / cloudflared
+          K="${{ needs.check.outputs.komari }}"
+          C="${{ needs.check.outputs.cloudflared }}"
+          N="${{ needs.check.outputs.nginx }}"
+          if [ -z "$K" ]; then K=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
+            https://api.github.com/repos/komari-monitor/komari/releases/latest | jq -r '.tag_name // empty'); fi
+          if [ -z "$C" ]; then C=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
+            https://api.github.com/repos/cloudflare/cloudflared/releases/latest | jq -r '.tag_name // empty'); fi
+          # nginx 查不到就保留上次记录，别把已有值覆盖成空
+          if [ -z "$N" ] || [ "$N" = "unknown" ]; then
+            if [ -f versions.lock ]; then . ./versions.lock; fi
+            N="${LOCK_NGINX:-}"
+          fi
+          printf 'LOCK_KOMARI=%s\nLOCK_CLOUDFLARED=%s\nLOCK_NGINX=%s\n' \
+            "${K:-unknown}" "${C:-unknown}" "${N}" > versions.lock
+          cat versions.lock
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add versions.lock
