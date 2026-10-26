@@ -95,10 +95,10 @@ services:
     image: po9873/komari:latest
     container_name: komari
     restart: unless-stopped
-    mac_address: "02:42:ac:11:00:02"
+    mac_address: "02:00:00:00:00:01"   # 示例值（本地管理地址），换成你自己的
     networks:
       lan:
-        ipv4_address: 192.168.1.100
+        ipv4_address: 192.0.2.10          # 示例值（RFC 5737 文档专用），换成你自己的
     volumes:
       - ./data:/app/data
       - ./nginx.conf:/etc/nginx/http.d/default.conf:ro
@@ -114,7 +114,9 @@ networks:
     name: macvlan0        # 宿主机上已有的 macvlan 网络名
 ```
 
-这样容器直接以 `192.168.1.100` 出现在局域网里，nginx 的 80/443 直接可访问，不再需要 `ports`。
+这样容器直接以你指定的 IP 出现在局域网里，nginx 的 80/443 直接可访问，不再需要 `ports`。
+
+上面两处用的是文档示例值（`192.0.2.0/24` 是 RFC 5737 保留给文档的网段，不属于任何人的内网），换成你自己网络的地址即可。
 
 ## 更新
 
