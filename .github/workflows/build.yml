@@ -246,5 +246,39 @@ jobs:
             echo "::error::IP 访问被误跳转"; exit 1
           fi
 
+          echo "=== 勾选框模式（KOMARI_LAN_TOGGLE=1，不跳转、首页注入开关）"
+          docker rm -f ktoggle >/dev/null 2>&1 || true
+          if ! TROUT=$(docker run -d --name ktoggle \
+            -e TUNNEL_TOKEN=0000000000000000000000000000000000000000000000000000000000000000 \
+            -e ADMIN_USERNAME=admin \
+            -e ADMIN_PASSWORD=test-only-not-a-secret \
+            -e KOMARI_LAN_TOGGLE=1 \
+            -e KOMARI_LAN_HOST=10.9.9.9 \
+            -e KOMARI_LAN_PORT=8080 \
+            -v /tmp/default.conf:/etc/nginx/http.d/default.conf:ro \
+            "$IMAGE" 2>&1); then
+            echo "::error::toggle 容器启动失败: $(echo "$TROUT" | tr '\n' ' ')"
+            exit 1
+          fi
+          sleep 12
+          TIP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' ktoggle)
+          PAGE=$(curl -s -H 'Host: panel.example.com' "http://$TIP/")
+          if ! echo "$PAGE" | grep -q '__WB_LAN__'; then
+            echo "::error::首页没有注入开关脚本"; docker rm -f ktoggle; exit 1
+          fi
+          if ! echo "$PAGE" | grep -q 'authority:"10.9.9.9:8080"'; then
+            echo "::error::注入的内网地址不对"; docker rm -f ktoggle; exit 1
+          fi
+          TCODE=$(curl -s -o /dev/null -w '%{http_code}' \
+                  -H 'Host: panel.example.com' -H 'Accept: text/html' "http://$TIP/")
+          echo "勾选框模式 HTTP: $TCODE"
+          if [ "$TCODE" != "200" ]; then
+            echo "::error::勾选框模式不应跳转，实际 $TCODE"; docker rm -f ktoggle; exit 1
+          fi
+          if ! docker exec ktoggle sh -c 'grep -q "__WB_LAN__" /usr/local/share/wb/lan-toggle.js'; then
+            echo "::error::镜像里没有 lan-toggle.js"; docker rm -f ktoggle; exit 1
+          fi
+          docker rm -f ktoggle >/dev/null 2>&1 || true
+
           echo "全部通过"
 

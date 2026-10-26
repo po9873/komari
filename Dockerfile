@@ -12,6 +12,7 @@ COPY --from=cloudflared /usr/local/bin/cloudflared /usr/local/bin/cloudflared
 
 COPY supervisord.conf /etc/supervisord.conf
 COPY entrypoint.sh /entrypoint.sh
+COPY lan-toggle.js /usr/local/share/wb/lan-toggle.js
 RUN chmod +x /entrypoint.sh
 
 EXPOSE 25775 80 443
