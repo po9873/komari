@@ -34,16 +34,21 @@ jobs:
           echo "cloudflared=${C:-unknown}"  >> "$GITHUB_OUTPUT"
           echo "komari=$K  cloudflared=$C"
 
-      - name: 查 nginx（跟随基础镜像的 alpine 源，不写死版本）
+      - name: 查 nginx（直接查 alpine 包索引，不拉镜像）
         id: ng
+        env:
+          # 与基础镜像的 alpine 分支保持一致（构建日志里是 alpine/v3.21）
+          BRANCH: v3.21
         run: |
-          IMG=ghcr.io/komari-monitor/komari:latest
-          docker pull -q "$IMG"
-          ALP=$(docker run --rm --entrypoint cat "$IMG" /etc/alpine-release 2>/dev/null | head -1)
-          V=$(timeout 180 docker run --rm --entrypoint sh "$IMG" -c \
-                'apk update >/dev/null 2>&1; apk search -x -q nginx | head -1' 2>/dev/null \
-              | sed -n 's/^nginx-\(.*\)$/\1/p' | head -1)
-          echo "alpine=${ALP:-unknown}  nginx=${V:-unknown}"
+          V=""
+          for repo in main community; do
+            if [ -n "$V" ]; then break; fi
+            V=$(curl -fsSL --retry 2 --max-time 30 \
+                  "https://dl-cdn.alpinelinux.org/alpine/${BRANCH}/${repo}/x86_64/APKINDEX.tar.gz" \
+                | tar -xzO APKINDEX 2>/dev/null \
+                | awk -F: '/^P:nginx$/{f=1;next} f&&/^V:/{print $2;exit}')
+          done
+          echo "alpine=${BRANCH}  nginx=${V:-unknown}"
           echo "nginx=${V:-unknown}" >> "$GITHUB_OUTPUT"
 
       - name: 与上次构建记录比对
@@ -137,11 +142,13 @@ jobs:
             https://api.github.com/repos/cloudflare/cloudflared/releases/latest | jq -r '.tag_name // empty'); fi
           # nginx 查不到就自己查一次（push / 手动构建时 check 被跳过）
           if [ -z "$N" ] || [ "$N" = "unknown" ]; then
-            IMG=ghcr.io/komari-monitor/komari:latest
-            docker pull -q "$IMG" || true
-            N=$(timeout 180 docker run --rm --entrypoint sh "$IMG" -c \
-                  'apk update >/dev/null 2>&1; apk search -x -q nginx | head -1' 2>/dev/null \
-                | sed -n 's/^nginx-\(.*\)$/\1/p' | head -1)
+            for repo in main community; do
+              if [ -n "$N" ]; then break; fi
+              N=$(curl -fsSL --retry 2 --max-time 30 \
+                    "https://dl-cdn.alpinelinux.org/alpine/v3.21/${repo}/x86_64/APKINDEX.tar.gz" \
+                  | tar -xzO APKINDEX 2>/dev/null \
+                  | awk -F: '/^P:nginx$/{f=1;next} f&&/^V:/{print $2;exit}')
+            done
           fi
           # 还是查不到就保留上次记录，别把已有值覆盖成空
           if [ -z "$N" ]; then
