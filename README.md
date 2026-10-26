@@ -47,7 +47,7 @@ server {
 EOF
 ```
 
-要上 TLS 就在这个文件里加 `listen 443 ssl;` 和证书路径，再把证书目录挂进容器。
+要上 TLS 就在这个文件里加 `listen 443 ssl;` 和证书路径，再把证书目录挂进容器。内网也用 `https://域名` 访问时这步不能省，原因见「内网也用 https 打开，为什么还必须有证书」。
 
 注意挂载目标是 `/etc/nginx/http.d/default.conf`：镜像里的 nginx 是 alpine 的包，只读 `http.d/*.conf`，`conf.d/` 不生效。
 
@@ -98,7 +98,7 @@ curl -I http://127.0.0.1/
 |---|---|---|
 | `/app/data` | **必须** | 数据库、插件、主题、节点密钥都在这里，不挂等于每次重建都清空 |
 | `/etc/nginx/http.d/default.conf` | 想改反代配置就**必须** | 用镜像自带的默认配置可以不挂；挂载目标不能写成 `conf.d/`，alpine 的 nginx 不读那里 |
-| `/certs` | 配了 443 就**必须** | conf 里有 `ssl_certificate` 就一定要挂，否则 `nginx -t` 报找不到文件、nginx 起不来 |
+| `/certs` | 配了 443 就**必须** | conf 里有 `ssl_certificate` 就一定要挂，否则 `nginx -t` 报找不到文件、nginx 起不来。内网用 `https://域名` 直连容器也属于这种情况，见下一节 |
 | `/acme` | **可选** | 只有用 HTTP-01 方式续证书（`certbot --webroot`、`acme.sh -w`）且把验证目录指到这里才需要；用 DNS-01 / 面板签发 / 第三方工具直接写 `/certs` 就不需要 |
 | `/icons` | **可选** | 只有 conf 里存在 `location /icons/ { alias /icons/; }` 且页面确实引用这些图片时才需要 |
 
@@ -158,6 +158,18 @@ server {
     }
 ```
 
+## 内网也用 `https://域名` 打开，为什么还必须有证书
+
+因为内网直连时，**Cloudflare 根本不在链路上**。浏览器访问 `https://komari.example.com`，DNS 被解析到容器 IP 后，TLS 握手的对端就是容器里的 nginx，不是 Cloudflare 边缘。公网方向那张证书由 Cloudflare 出示，内网方向没人替你出，只能容器自己出 —— 所以：
+
+- `/certs` 必须挂，conf 里必须写 `listen 443 ssl` 和 `ssl_certificate`
+- 里面必须是**这个域名签发**的证书（Let's Encrypt 之类公共 CA）。自签证书在浏览器里是红锁，节点上装 agent 用 `curl` 拉安装脚本时会直接失败
+- 证书续期后 `docker exec komari nginx -s reload` 一次就生效，不用重建容器
+
+反过来说，什么时候不需要证书：内网只用 `http://容器IP:端口` 访问，那 443 和 `/certs` 都可以不要。
+
+这也决定了下面三选一里该选哪个：内网访问方式是 `https://域名`，就只能选 **C（内网 DNS）**。A 会把命令里的地址换成 `http://IP:端口`，B 会直接 302 跳到 `http://IP`，两个都是"丢掉 https、丢掉域名"的降级方案。
+
 ## 局域网访问不绕 Cloudflare
 
 面板生成的安装命令，用的是「你在浏览器里访问的那个地址」。所以内网设备如果用域名打开面板，复制出来的命令就是域名 —— 内网机器装 agent 时会先出公网、绕一圈 Cloudflare 再回来，慢且容易失败。
@@ -168,7 +180,7 @@ server {
 |---|---|---|---|
 | A. 面板里给一个勾选框 | `KOMARI_LAN_TOGGLE=1` | 手动切换，看得见状态 | 内网、公网机器都要装 |
 | B. 自动跳转 | `KOMARI_LAN_AUTO=1` | 内网用域名打开会自动跳到 `http://容器IP` | 只在局域网用面板 |
-| C. 内网 DNS 静态解析 | 不用镜像参与 | 域名始终是域名，内网直接连容器 | 想保持 https + 域名 |
+| C. 内网 DNS 加一条本地记录 | 不用镜像参与 | 域名始终是域名，内网直接连容器，https 不变 | 内网也用 `https://域名` 打开 |
 
 三种都要求**内网的设备能直接连到容器**（容器接了 macvlan / host 网络之类）。默认的 bridge + `ports` 映射，容器 IP 是 `172.x`，内网其它机器连不上，这三个都别开。
 
@@ -212,45 +224,35 @@ server {
 
 `nginx.conf` 里需要有那段 `if ($wb_redirect_lan)`，见「部署」第 1 步。
 
-### C. 内网 DNS 静态解析（不用开上面两个）
+### C. 内网 DNS 加一条静态记录（不用开上面两个）
 
-如果你更希望「命令永远显示域名」，就在**任意一层 DNS** 上加一条本地记录，把面板域名指向容器 IP。这样内网解析到容器、公网解析到 Cloudflare，一份命令内网外网通用。
-
-关键不是「必须在路由器上做」，也不是某个品牌专属功能 —— 只要**你的内网 DNS 允许添加一条本地记录**就行，在哪台设备上做完都一样。下面几种任选其一，按你手上有的来。
-
-**1. AdGuard Home（过滤器 → DNS 重写）**
+要做的只有一件事：**在内网某台 DNS 上，把面板域名直接解析到容器 IP**，别让它去问公网。
 
 ```
-komari.example.com    192.0.2.10
+komari.example.com   →   192.0.2.10
 ```
 
-改完在它自己的「查询日志」里能看到 `Rewrite` 标记，说明命中。
+不要求特定设备、特定固件、特定品牌。唯一的前提是**你内网里有一层 DNS 允许加本地记录** —— 单独跑的内网 DNS 服务、路由/DHCP 自带的解析功能、NAS 上的解析服务、Linux 上跑的解析服务、甚至单台机器的 hosts，加在哪一层效果都一样。哪层方便用哪层，不需要为了这个换设备。
 
-**2. dnsmasq 系（OpenWrt、群晖、华硕梅林、多数 Linux 路由的底层都是它）**
+两种形态，按你手上有的来：
 
-`/etc/dnsmasq.conf` 或 `dnsmasq.d/` 下新建一个文件：
+**形态一：有界面，表格里填「域名 + 地址」**
+
+界面上能填「域名 / 主机名」和「IP / 目标地址」两栏的就是它。入口名字各家不一样，可能在 DNS 重写、本地 DNS、静态域名、主机映射、Hosts、DHCP 静态分配里面 —— 名字不重要，有这两栏就是同一个功能。
+
+**形态二：写配置文件，加一行**
+
+dnsmasq 及沿用同一配置语法的实现（大量路由固件、NAS、Linux 发行版的底层都是它）：
 
 ```
 address=/komari.example.com/192.0.2.10
 ```
 
-**3. mosdns（`hosts` 插件）**
+写进主配置或配置目录下任意一个新文件，然后重启那个 DNS 服务。用 BIND 这类 zone 文件的，就加一条普通 A 记录，效果一样。
 
-```yaml
-- tag: hosts
-  type: hosts
-  args:
-    entries:
-      - "komari.example.com 192.0.2.10"
-```
+**形态三：先在一台机器上验证（hosts）**
 
-**4. 路由器自带的「静态 DNS / 域名解析 / 主机名映射」**
-
-支持这个功能的路由都能做，只是入口名字不一样：有的在「DHCP 设置」里，有的在「DNS 设置」里，有的叫「本地域名」「静态域名」「Hosts」。找不到就当它没有 —— **没这个功能也不用换路由**，把它的上游 DNS 指到 AdGuard Home / dnsmasq / mosdns，在那上面加，效果完全一样。
-
-**5. 单台设备临时验证（client hosts）**
-
-不想动任何服务时，先在一台机器上试：
+不想动任何服务时用这个，改完只是这一台生效：
 
 ```
 # Linux / macOS: /etc/hosts      Windows: C:\Windows\System32\drivers\etc\hosts
@@ -261,7 +263,7 @@ address=/komari.example.com/192.0.2.10
 
 - 内网设备解析 → `192.0.2.10`，直连容器，443 证书照样有效，不碰 Cloudflare
 - 公网设备解析 → Cloudflare 的地址，走隧道
-- 面板里复制出来的命令一直是 `https://komari.example.com/install.sh ...`，两边都能装
+- 面板里复制出来的命令一直是 `https://komari.example.com/install.sh ...`，两边都能装，不用切换
 
 **怎么确认改对了**（改的是哪一层，就问哪一层）：
 
