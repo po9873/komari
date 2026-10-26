@@ -157,6 +157,13 @@ jobs:
     if: needs.build.result == 'success'
     runs-on: ubuntu-latest
     steps:
+      - name: Login to Docker Hub（避免 runner 共享出口被匿名限流）
+        uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: 拉起镜像并验证
         env:
           IMAGE: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/komari:latest
@@ -184,21 +191,32 @@ jobs:
           }
           NGINX
 
-          docker run -d --name t \
+          if ! RUNOUT=$(docker run -d --name t \
             -e TUNNEL_TOKEN=0000000000000000000000000000000000000000000000000000000000000000 \
             -e ADMIN_USERNAME=admin \
             -e ADMIN_PASSWORD=test-only-not-a-secret \
             -e KOMARI_LAN_AUTO=1 \
             -e KOMARI_LAN_HOST=10.9.9.9 \
             -v /tmp/default.conf:/etc/nginx/http.d/default.conf:ro \
-            "$IMAGE"
+            "$IMAGE" 2>&1); then
+            echo "::error::docker run 失败: $(echo "$RUNOUT" | tr '\n' ' ')"
+            exit 1
+          fi
           trap 'docker logs t --tail=40; docker rm -f t' EXIT
           sleep 12
 
           echo "=== 生成的 00-lan.conf"
-          docker exec t cat /etc/nginx/http.d/00-lan.conf
+          if ! LANC=$(docker exec t cat /etc/nginx/http.d/00-lan.conf 2>&1); then
+            echo "::error::00-lan.conf 没生成: $(echo "$LANC" | tr '\n' ' ')"
+            exit 1
+          fi
+          echo "$LANC"
           echo "=== nginx -t"
-          docker exec t nginx -t
+          if ! NGT=$(docker exec t nginx -t 2>&1); then
+            echo "::error::nginx -t 失败: $(echo "$NGT" | tr '\n' ' ')"
+            exit 1
+          fi
+          echo "$NGT"
           echo "=== 进程"
           docker exec t sh -c 'ps | grep -E "komari|nginx|cloudflared" | grep -v grep' || true
 
