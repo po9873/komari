@@ -90,6 +90,74 @@ curl -I http://127.0.0.1/
 
 三个进程都在、`curl` 返回 `200` 或 `302` 就算起来了。
 
+## 挂载说明（哪个能删、哪个不能）
+
+镜像本身只依赖一个目录：`/app/data`。其余挂载都是**你自己那份 `nginx.conf` 里写了路径**才需要的，不是镜像要求的。
+
+| 容器内路径 | 要不要挂 | 判断依据 |
+|---|---|---|
+| `/app/data` | **必须** | 数据库、插件、主题、节点密钥都在这里，不挂等于每次重建都清空 |
+| `/etc/nginx/http.d/default.conf` | 想改反代配置就**必须** | 用镜像自带的默认配置可以不挂；挂载目标不能写成 `conf.d/`，alpine 的 nginx 不读那里 |
+| `/certs` | 配了 443 就**必须** | conf 里有 `ssl_certificate` 就一定要挂，否则 `nginx -t` 报找不到文件、nginx 起不来 |
+| `/acme` | **可选** | 只有用 HTTP-01 方式续证书（`certbot --webroot`、`acme.sh -w`）且把验证目录指到这里才需要；用 DNS-01 / 面板签发 / 第三方工具直接写 `/certs` 就不需要 |
+| `/icons` | **可选** | 只有 conf 里存在 `location /icons/ { alias /icons/; }` 且页面确实引用这些图片时才需要 |
+
+两个最常见的坑：
+
+- **删 `/certs` 会直接让面板打不开**：不是少个功能，是 nginx 起不来。要走这条得同时把 conf 里的 `listen 443 ssl` 和证书配置删掉。
+- **删 `/acme`、`/icons` 是安全的**：`root` / `alias` 指向不存在的目录，nginx 照样启动，只是那些路径返回 404。
+
+带 TLS 的完整示例（3 个挂载，路径和域名都是示例值）：
+
+```yaml
+services:
+  komari:
+    image: po9873/komari:latest
+    container_name: komari
+    restart: always
+    volumes:
+      - ./data:/app/data
+      - ./nginx.conf:/etc/nginx/http.d/default.conf:ro
+      - ./certs:/certs:ro
+    environment:
+      ADMIN_USERNAME: admin
+      ADMIN_PASSWORD: 换成你的密码
+      TUNNEL_TOKEN: 换成你的隧道Token
+      GODEBUG: disablethp=1
+```
+
+对应的 `nginx.conf` 里 443 段：
+
+```nginx
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name komari.example.com;
+
+    ssl_certificate     /certs/fullchain.pem;
+    ssl_certificate_key /certs/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:25775;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+```
+
+证书续期不归这个镜像管。如果续期工具是把新证书写进 `./certs` 目录（DNS-01、面板签发、API 方式都这样），续完执行 `docker exec komari nginx -s reload` 即可，**不需要** `/acme`；只有 `certbot --webroot` 这类才需要额外挂 `/acme`，并让 conf 里带上：
+
+```nginx
+    location /.well-known/acme-challenge/ {
+        root /acme;
+    }
+```
+
 ## 局域网访问不绕 Cloudflare
 
 面板生成的安装命令，用的是「你在浏览器里访问的那个地址」。所以内网设备如果用域名打开面板，复制出来的命令就是域名 —— 内网机器装 agent 时会先出公网、绕一圈 Cloudflare 再回来，慢且容易失败。
