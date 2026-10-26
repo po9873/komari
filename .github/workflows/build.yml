@@ -191,7 +191,7 @@ jobs:
           }
           NGINX
 
-          if ! RUNOUT=$(docker run -d --name t \
+          if ! RUNOUT=$(docker run -d --name ksmoke \
             -e TUNNEL_TOKEN=0000000000000000000000000000000000000000000000000000000000000000 \
             -e ADMIN_USERNAME=admin \
             -e ADMIN_PASSWORD=test-only-not-a-secret \
@@ -202,25 +202,25 @@ jobs:
             echo "::error::docker run 失败: $(echo "$RUNOUT" | tr '\n' ' ')"
             exit 1
           fi
-          trap 'docker logs t --tail=40; docker rm -f t' EXIT
+          trap 'docker logs ksmoke --tail=40; docker rm -f ksmoke' EXIT
           sleep 12
 
           echo "=== 生成的 00-lan.conf"
-          if ! LANC=$(docker exec t cat /etc/nginx/http.d/00-lan.conf 2>&1); then
+          if ! LANC=$(docker exec ksmoke cat /etc/nginx/http.d/00-lan.conf 2>&1); then
             echo "::error::00-lan.conf 没生成: $(echo "$LANC" | tr '\n' ' ')"
             exit 1
           fi
           echo "$LANC"
           echo "=== nginx -t"
-          if ! NGT=$(docker exec t nginx -t 2>&1); then
+          if ! NGT=$(docker exec ksmoke nginx -t 2>&1); then
             echo "::error::nginx -t 失败: $(echo "$NGT" | tr '\n' ' ')"
             exit 1
           fi
           echo "$NGT"
           echo "=== 进程"
-          docker exec t sh -c 'ps | grep -E "komari|nginx|cloudflared" | grep -v grep' || true
+          docker exec ksmoke sh -c 'ps | grep -E "komari|nginx|cloudflared" | grep -v grep' || true
 
-          IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' t)
+          IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' ksmoke)
           echo "容器 IP: $IP"
 
           echo "=== 内网直连 + 域名 Host（应 302 到 10.9.9.9）"
