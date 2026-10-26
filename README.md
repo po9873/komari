@@ -214,18 +214,63 @@ server {
 
 ### C. 内网 DNS 静态解析（不用开上面两个）
 
-如果你更希望「命令永远显示域名」，就在路由器或内网 DNS 上把面板域名指向容器 IP。这样内网解析到容器、公网解析到 Cloudflare，一份命令内网外网通用。
+如果你更希望「命令永远显示域名」，就在**任意一层 DNS** 上加一条本地记录，把面板域名指向容器 IP。这样内网解析到容器、公网解析到 Cloudflare，一份命令内网外网通用。
 
-在 dnsmasq / AdGuard Home / OpenWrt / iKuai 这类设备上加一条静态解析（**下面是 RFC 5737 文档示例，换成自己的**）：
+关键不是「必须在路由器上做」，也不是某个品牌专属功能 —— 只要**你的内网 DNS 允许添加一条本地记录**就行，在哪台设备上做完都一样。下面几种任选其一，按你手上有的来。
+
+**1. AdGuard Home（过滤器 → DNS 重写）**
 
 ```
-# 域名                     指向
-komari.example.com        192.0.2.10
+komari.example.com    192.0.2.10
 ```
+
+改完在它自己的「查询日志」里能看到 `Rewrite` 标记，说明命中。
+
+**2. dnsmasq 系（OpenWrt、群晖、华硕梅林、多数 Linux 路由的底层都是它）**
+
+`/etc/dnsmasq.conf` 或 `dnsmasq.d/` 下新建一个文件：
+
+```
+address=/komari.example.com/192.0.2.10
+```
+
+**3. mosdns（`hosts` 插件）**
+
+```yaml
+- tag: hosts
+  type: hosts
+  args:
+    entries:
+      - "komari.example.com 192.0.2.10"
+```
+
+**4. 路由器自带的「静态 DNS / 域名解析 / 主机名映射」**
+
+支持这个功能的路由都能做，只是入口名字不一样：有的在「DHCP 设置」里，有的在「DNS 设置」里，有的叫「本地域名」「静态域名」「Hosts」。找不到就当它没有 —— **没这个功能也不用换路由**，把它的上游 DNS 指到 AdGuard Home / dnsmasq / mosdns，在那上面加，效果完全一样。
+
+**5. 单台设备临时验证（client hosts）**
+
+不想动任何服务时，先在一台机器上试：
+
+```
+# Linux / macOS: /etc/hosts      Windows: C:\Windows\System32\drivers\etc\hosts
+192.0.2.10    komari.example.com
+```
+
+加完的效果：
 
 - 内网设备解析 → `192.0.2.10`，直连容器，443 证书照样有效，不碰 Cloudflare
 - 公网设备解析 → Cloudflare 的地址，走隧道
 - 面板里复制出来的命令一直是 `https://komari.example.com/install.sh ...`，两边都能装
+
+**怎么确认改对了**（改的是哪一层，就问哪一层）：
+
+```bash
+nslookup komari.example.com 你的内网DNS地址    # 应该返回 192.0.2.10
+nslookup komari.example.com 223.5.5.5          # 应该返回 Cloudflare 的地址
+```
+
+两条结果不一样，才说明本地解析生效了。若是同一个结果，说明客户端没走那台 DNS，或者记录没生效。
 
 这种方式镜像不参与，`KOMARI_LAN_TOGGLE` 和 `KOMARI_LAN_AUTO` 都留空即可。
 
