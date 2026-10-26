@@ -28,14 +28,16 @@ else
         [ "$lan_host" = "127.0.1.1" ] && lan_host=""
     fi
 
-    # 默认 80：macvlan 直连时 nginx 就听 80，不需要额外配置
-    lan_port="${KOMARI_LAN_PORT:-80}"
+    # 默认跟着 nginx 实际监听的端口（macvlan 直连时就是它，不用配）
+    lan_port="${KOMARI_LAN_PORT:-}"
 
     if [ -z "$lan_host" ]; then
         echo "[entrypoint] KOMARI_LAN_AUTO=1 但没探测到容器的 IPv4，内网跳转已跳过" >&2
         lan_disabled
     else
-        if [ "$lan_port" = "80" ]; then
+        if [ -z "$lan_port" ]; then
+            lan_authority="$lan_host:\$server_port"
+        elif [ "$lan_port" = "80" ]; then
             lan_authority="$lan_host"
         else
             lan_authority="$lan_host:$lan_port"
@@ -66,7 +68,7 @@ map \$host \$wb_lan_authority {
     default "$lan_authority";
 }
 EOF
-        echo "[entrypoint] 内网跳转已启用：未经 Cloudflare 的页面请求会转到 http://$lan_authority"
+        echo "[entrypoint] 内网跳转已启用 -> http://$lan_authority"
     fi
 fi
 
