@@ -14,7 +14,7 @@ po9873/komari:latest
 |---|---|---|
 | komari | `127.0.0.1:25775` | 面板本体，只在容器内部，不对外 |
 | nginx | `80` | 反代到 `127.0.0.1:25775` |
-| cloudflared | — | 用 `TUNNEL_TOKEN` 建隧道，回源 `127.0.0.1:25775` |
+| cloudflared | — | 用 `TUNNEL_TOKEN` 建隧道。回源地址在 Cloudflare 面板里配，要指向 **nginx**（80 / 25774 / 443 都行），不要指向 komari 的 25775 |
 
 ## 部署
 
@@ -99,15 +99,16 @@ curl -I http://127.0.0.1/
 | `/app/data` | **必须** | 数据库、插件、主题、节点密钥都在这里，不挂等于每次重建都清空 |
 | `/etc/nginx/http.d/default.conf` | 想改反代配置就**必须** | 用镜像自带的默认配置可以不挂；挂载目标不能写成 `conf.d/`，alpine 的 nginx 不读那里 |
 | `/certs` | 配了 443 就**必须** | conf 里有 `ssl_certificate` 就一定要挂，否则 `nginx -t` 报找不到文件、nginx 起不来。内网用 `https://域名` 直连容器也属于这种情况，见下一节 |
-| `/acme` | **可选** | 只有用 HTTP-01 方式续证书（`certbot --webroot`、`acme.sh -w`）且把验证目录指到这里才需要；用 DNS-01 / 面板签发 / 第三方工具直接写 `/certs` 就不需要 |
+| `/acme` | 走 HTTP-01 续期就**必须** | conf 里有 `location /.well-known/acme-challenge/ { root /acme; }` 就一定要挂，否则挑战文件 404、续期静默失败，90 天后证书过期内网 https 才炸。走 DNS-01 不需要，见「证书自动续期」 |
 | `/icons` | **可选** | 只有 conf 里存在 `location /icons/ { alias /icons/; }` 且页面确实引用这些图片时才需要 |
 
 两个最常见的坑：
 
 - **删 `/certs` 会直接让面板打不开**：不是少个功能，是 nginx 起不来。要走这条得同时把 conf 里的 `listen 443 ssl` 和证书配置删掉。
-- **删 `/acme`、`/icons` 是安全的**：`root` / `alias` 指向不存在的目录，nginx 照样启动，只是那些路径返回 404。
+- **删 `/acme` 当天没有任何感觉，60 天后才炸**：站点照常跑，但续期时挑战文件写不进来（nginx 那边 404），证书到 90 天原地过期。这种失效不会报警，只会在某天内网 https 突然报错。
+- **删 `/icons` 是安全的**：`alias` 指向不存在的目录，nginx 照样启动，只是那些路径返回 404。
 
-带 TLS 的完整示例（3 个挂载，路径和域名都是示例值）：
+带 TLS 的完整示例（4 个挂载，路径和域名都是示例值；走 DNS-01 续期的话 `/acme` 那行可以删）：
 
 ```yaml
 services:
@@ -119,6 +120,7 @@ services:
       - ./data:/app/data
       - ./nginx.conf:/etc/nginx/http.d/default.conf:ro
       - ./certs:/certs:ro
+      - ./acme:/acme:ro            # 走 HTTP-01 webroot 续期才需要，见「证书自动续期」
     environment:
       ADMIN_USERNAME: admin
       ADMIN_PASSWORD: 换成你的密码
@@ -150,13 +152,7 @@ server {
 }
 ```
 
-证书续期不归这个镜像管。如果续期工具是把新证书写进 `./certs` 目录（DNS-01、面板签发、API 方式都这样），续完执行 `docker exec komari nginx -s reload` 即可，**不需要** `/acme`；只有 `certbot --webroot` 这类才需要额外挂 `/acme`，并让 conf 里带上：
-
-```nginx
-    location /.well-known/acme-challenge/ {
-        root /acme;
-    }
-```
+证书续期不归这个镜像管，但**不能不配**：证书 90 天到期，到期那天内网 `https://域名` 就开始报错。走 HTTP-01 需要额外挂 `/acme`，走 DNS-01 不需要 —— 具体步骤见下面的「证书自动续期」。
 
 ## 内网也用 `https://域名` 打开，为什么还必须有证书
 
@@ -169,6 +165,111 @@ server {
 反过来说，什么时候不需要证书：内网只用 `http://容器IP:端口` 访问，那 443 和 `/certs` 都可以不要。
 
 这也决定了下面三选一里该选哪个：内网访问方式是 `https://域名`，就只能选 **C（内网 DNS）**。A 会把命令里的地址换成 `http://IP:端口`，B 会直接 302 跳到 `http://IP`，两个都是"丢掉 https、丢掉域名"的降级方案。
+
+## 证书自动续期
+
+`/certs` 里的证书 90 天到期。到期没换，公网看着一切正常（那是 Cloudflare 边缘的证书），但**内网用 `https://域名` 会当天开始报错**——那一跳的证书就是容器里这一份。所以「挂 `/certs`」和「配自动续期」是同一件事的两半，只做前半等于埋了个 90 天后的定时炸弹。
+
+### 证书是你自己签的，镜像里一份都不带
+
+这一点先说清楚，免得以为镜像里藏了证书：
+
+- `/certs` 初始就是**空目录**，镜像不带证书、不带私钥、不带任何人的域名
+- `/acme` 也只是一个**空目录**，专门用来放验证文件；谁签证书就往里写，跟别人毫无关系
+- 本文里的 `komari.example.com`、`192.0.2.10`、`you@example.com` 全是占位符，换成你自己的域名、自己的 IP、自己的邮箱
+- 每个人签自己的：你的域名只认你的验证文件，别人的 `/acme` 和 `/certs` 在别人的机器上，两边互不可见、互不影响
+
+### 首次签发的顺序（反了会把面板搞挂）
+
+镜像启动时 `/certs` 是空的，而 `listen 443 ssl` 一加载就要读证书文件。所以顺序必须是「先能跑 → 再签 → 再开 443」：
+
+1. 先起容器，`nginx.conf` 里**只有 http 那段**（80 或 25774），不要写 `listen 443 ssl`
+2. 按下面的方式一或方式二签发，把 `fullchain.pem` / `privkey.pem` 落进 `./certs`
+3. 再把 443 段加进 `nginx.conf`，`docker exec komari nginx -s reload`（已挂载 conf，reload 就生效，不用重启容器）
+4. `curl -I https://你的域名` 返回 200 就完成了
+
+反过来先写 443、`/certs` 还空着：`nginx -t` 报找不到 pem → nginx 起不来 → 整个面板打不开，看起来像是镜像坏了，其实只是证书没到位。
+
+### 两种续期方式，先确认自己属于哪一种
+
+| 续期方式 | CA 怎么验你 | `/acme` | 需要 80 端口被外面访问到 |
+|---|---|---|---|
+| HTTP-01（`--webroot`） | 抓 `http://域名/.well-known/acme-challenge/<token>` | **必须挂** | 需要 |
+| DNS-01（Cloudflare API Token） | 在 CF 加一条 `_acme-challenge` TXT | 不需要 | 不需要 |
+
+域名挂在 Cloudflare 上**不影响** HTTP-01：CF 默认把 `/.well-known/acme-challenge/` 原样透传到源站，不改写也不拦。一条命令就能确认（换成你的域名）：
+
+```bash
+curl -i http://komari.example.com/.well-known/acme-challenge/probe
+```
+
+- 返回 nginx 的 `404`：请求已经到源站，只是文件不存在 —— **这条路是通的**
+- 返回 CF 的 301/403 页面，或者连不上：CF 那边挡了，改用 DNS-01
+
+### 方式一：DNS-01（不依赖 80 端口，推荐）
+
+不需要 `/acme`，也不需要和 CA 建立任何入站连接，只要一个能改 CF DNS 的 Token（权限 `Zone → DNS → Edit`，范围限定到这一个 zone）。
+
+```bash
+curl https://get.acme.sh | sh -s email=you@example.com
+
+export CF_Token="你的 Cloudflare API Token"
+export CF_Account_ID="你的 Account ID"        # 用 Zone 级 Token 时可留空
+
+~/.acme.sh/acme.sh --issue --dns dns_cf -d komari.example.com \
+  --key-file       /你的路径/certs/privkey.pem \
+  --fullchain-file /你的路径/certs/fullchain.pem \
+  --reloadcmd      "docker exec komari nginx -s reload"
+```
+
+`acme.sh` 安装时自己写好 cron，之后每 60 天换一次证书并执行 `--reloadcmd`，nginx 当场 reload，不用重建容器。证书直接落在 `./certs`，公网方向完全不受影响。
+
+### 方式二：HTTP-01 webroot（要挂 `/acme` 的那种）
+
+三样东西必须同时成立，缺一样都会静默失败：
+
+1. compose 里挂上（只读够用——写文件的是宿主机上的续期客户端，容器只负责把它吐出去）：
+   ```yaml
+         - ./acme:/acme:ro
+   ```
+2. **80 和 443 的 server 块里都要**有这段（LE 可能跟着 80 上的跳转去 443 取挑战文件）：
+   ```nginx
+       location /.well-known/acme-challenge/ {
+           root /acme;
+       }
+   ```
+3. 这段 `location` 要放在 302 之前——就算开了 B（`KOMARI_LAN_AUTO`）也不会把挑战请求跳走，因为跳转只对 `Accept: text/html` 的请求生效，CA 抓文件时带的是 `*/*`。这条只是提醒你别把它写进别的 `location` 里面去。
+
+签发，并让证书落到 `./certs`：
+
+```bash
+certbot certonly --webroot -w /你的路径/acme -d komari.example.com \
+  --deploy-hook "cp /etc/letsencrypt/live/komari.example.com/fullchain.pem /你的路径/certs/ && cp /etc/letsencrypt/live/komari.example.com/privkey.pem /你的路径/certs/ && chmod 600 /你的路径/certs/privkey.pem && docker exec komari nginx -s reload"
+```
+
+`--deploy-hook` 会被写进续期配置，之后 `certbot renew` 自动执行它，所以只要一条 cron：
+
+```bash
+0 3 * * * certbot renew --quiet
+```
+
+### 验证续期是真的会跑
+
+别等 90 天。签发完立刻空跑一次，能过才算配好：
+
+```bash
+certbot renew --dry-run                                        # webroot 方式
+~/.acme.sh/acme.sh --renew -d komari.example.com --force        # DNS-01 方式
+```
+
+再确认容器里确实换成了新证书：
+
+```bash
+docker exec komari nginx -t
+echo | openssl s_client -connect 192.0.2.10:443 -servername komari.example.com 2>/dev/null | openssl x509 -noout -dates
+```
+
+`notAfter` 已经是新日期就对了。到期前 30 天还没变，说明续期挂了——盯这一条就够，不用翻日志。
 
 ## 局域网访问不绕 Cloudflare
 
