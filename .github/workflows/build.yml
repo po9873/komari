@@ -91,11 +91,11 @@ jobs:
         run: |
           {
             echo 'tags<<__TAGS__'
-            echo "docker.io/${DH_USER}/komari-all-in-one:latest"
-            echo "ghcr.io/${GITHUB_REPOSITORY_OWNER}/komari-all-in-one:latest"
+            echo "docker.io/${DH_USER}/komari:latest"
+            echo "ghcr.io/${GITHUB_REPOSITORY_OWNER}/komari:latest"
             echo '__TAGS__'
           } >> "$GITHUB_OUTPUT"
-          echo "将推送：docker.io/${DH_USER}/komari-all-in-one:latest"
+          echo "将推送：docker.io/${DH_USER}/komari:latest"
 
       - name: Build and push
         uses: docker/build-push-action@v6
