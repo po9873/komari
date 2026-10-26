@@ -1,4 +1,4 @@
-# komari-all-in-one
+# komari（all-in-one）
 
 把 komari + nginx + cloudflared 三个进程打进**一个镜像**，由 supervisord 启动。
 仓库只做“打包”——网络、IP/MAC、密码、Token 全部由你自己的运行环境提供。
@@ -11,13 +11,13 @@
 
 ## 构建 / 运行
 - push 到 main 自动构建，同时推到两个仓库：
-  - Docker Hub：`docker.io/<你的DockerHub用户名>/komari-all-in-one:latest`
-  - GHCR：`ghcr.io/<你>/komari-all-in-one:latest`
+  - Docker Hub：`docker.io/<你的DockerHub用户名>/komari:latest`
+  - GHCR：`ghcr.io/<你>/komari:latest`
 - 要用 Docker Hub，需在仓库 **Settings → Secrets and variables → Actions** 里加两个 secret：
   - `DOCKERHUB_USERNAME` — Docker Hub 用户名
   - `DOCKERHUB_TOKEN` — Docker Hub 的 Access Token（hub.docker.com → Account settings → Security → New Access Token，权限给 Read & Write）
-  - 未配置这两个 secret 时，工作流只推 GHCR，不会报错。
-- 本地构建：`docker build -t komari-all-in-one .`
+  - 未配置这两个 secret 时，构建会直接失败并提示，避免误以为推送成功。
+- 本地构建：`docker build -t komari .`
 - 运行：跟原来三个容器时一样，把这个镜像替换掉那三个容器即可；网络、IP/MAC、`ADMIN_*`、`TUNNEL_TOKEN`、挂载目录都按你本机原样传。
 
 容器内：komari 只听 `127.0.0.1:25775`，nginx 反代它并负责 80/443，cloudflared 走隧道。
