@@ -1,0 +1,87 @@
+name: Build komari-all-in-one when upstream updates
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:          # 手动强制构建
+  schedule:
+    # 每天检查一次上游；没更新就直接退出，不构建
+    - cron: '0 3 * * *'       # 每天 UTC 03:00（北京时间约 11:00）
+
+jobs:
+  check:
+    # 只有定时任务才做版本比对；push / 手动直接进 build
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.diff.outputs.changed }}
+      komari: ${{ steps.up.outputs.komari }}
+      cloudflared: ${{ steps.up.outputs.cloudflared }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 查上游最新版本
+        id: up
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          K=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
+              https://api.github.com/repos/komari-monitor/komari/releases/latest | jq -r '.tag_name // empty')
+          C=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
+              https://api.github.com/repos/cloudflare/cloudflared/releases/latest | jq -r '.tag_name // empty')
+          echo "komari=${K:-unknown}"       >> "$GITHUB_OUTPUT"
+          echo "cloudflared=${C:-unknown}"  >> "$GITHUB_OUTPUT"
+
+      - name: 与上次构建记录比对
+        id: diff
+        run: |
+          if [ -f versions.lock ]; then . ./versions.lock; fi
+          echo "上游 : komari=${{ steps.up.outputs.komari }} cloudflared=${{ steps.up.outputs.cloudflared }}"
+          echo "上次 : komari=${LOCK_KOMARI:-none} cloudflared=${LOCK_CLOUDFLARED:-none}"
+          if [ "${{ steps.up.outputs.komari }}" != "${LOCK_KOMARI:-}" ] || \
+             [ "${{ steps.up.outputs.cloudflared }}" != "${LOCK_CLOUDFLARED:-}" ]; then
+            echo "changed=true"  >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: check
+    # push / 手动 直接构建；定时任务只有检测到上游变化才构建
+    if: always() && (github.event_name != 'schedule' || needs.check.outputs.changed == 'true')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # 用来把上游版本写回 versions.lock
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          pull: true
+          no-cache: true
+          tags: ghcr.io/${{ github.repository_owner }}/komari-all-in-one:latest
+
+      - name: 记录本次上游版本（防止下次重复构建）
+        if: github.event_name == 'schedule'
+        run: |
+          printf 'LOCK_KOMARI=%s\nLOCK_CLOUDFLARED=%s\n' \
+            "${{ needs.check.outputs.komari }}" "${{ needs.check.outputs.cloudflared }}" > versions.lock
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add versions.lock
+          git commit -m "chore: record upstream versions [skip ci]" || echo "no change"
+          git push || echo "push skipped"
