@@ -150,3 +150,83 @@ jobs:
           git add versions.lock
           git commit -m "chore: record upstream versions [skip ci]" || echo "no change"
           git push || echo "push skipped"
+
+  smoke:
+    # 真正把镜像拉起来验证一遍：nginx 配置能被加载、三个进程都在、内网跳转按预期生效
+    needs: build
+    if: needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: 拉起镜像并验证
+        env:
+          IMAGE: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/komari:latest
+        run: |
+          set -e
+          cat > /tmp/default.conf <<'NGINX'
+          server {
+              listen 80;
+              client_max_body_size 50m;
+
+              if ($wb_redirect_lan) {
+                  return 302 http://$wb_lan_authority$request_uri;
+              }
+
+              location / {
+                  proxy_pass http://127.0.0.1:25775;
+                  proxy_http_version 1.1;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+                  proxy_set_header Upgrade $http_upgrade;
+                  proxy_set_header Connection "upgrade";
+              }
+          }
+          NGINX
+
+          docker run -d --name t \
+            -e TUNNEL_TOKEN=0000000000000000000000000000000000000000000000000000000000000000 \
+            -e ADMIN_USERNAME=admin \
+            -e ADMIN_PASSWORD=test-only-not-a-secret \
+            -e KOMARI_LAN_AUTO=1 \
+            -e KOMARI_LAN_HOST=10.9.9.9 \
+            -v /tmp/default.conf:/etc/nginx/http.d/default.conf:ro \
+            "$IMAGE"
+          trap 'docker logs t --tail=40; docker rm -f t' EXIT
+          sleep 12
+
+          echo "=== 生成的 00-lan.conf"
+          docker exec t cat /etc/nginx/http.d/00-lan.conf
+          echo "=== nginx -t"
+          docker exec t nginx -t
+          echo "=== 进程"
+          docker exec t sh -c 'ps | grep -E "komari|nginx|cloudflared" | grep -v grep' || true
+
+          IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' t)
+          echo "容器 IP: $IP"
+
+          echo "=== 内网直连 + 域名 Host（应 302 到 10.9.9.9）"
+          OUT=$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' \
+                -H 'Host: panel.example.com' -H 'Accept: text/html' "http://$IP/")
+          echo "$OUT"
+          echo "$OUT" | grep -q '^302 ' || { echo "::error::内网跳转没生效（期望 302）"; exit 1; }
+          echo "$OUT" | grep -q '10\.9\.9\.9' || { echo "::error::跳转目标不是容器内网地址"; exit 1; }
+
+          echo "=== 模拟走 Cloudflare（带 CF-Ray，不应跳转）"
+          OUT2=$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' \
+                 -H 'Host: panel.example.com' -H 'Accept: text/html' -H 'CF-Ray: 8c0ffee-PEK' "http://$IP/")
+          echo "$OUT2"
+          if echo "$OUT2" | grep -q '10\.9\.9\.9'; then
+            echo "::error::Cloudflare 请求被误跳转"; exit 1
+          fi
+
+          echo "=== 用 IP 访问（不应跳转）"
+          OUT3=$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' \
+                 -H 'Accept: text/html' "http://$IP/")
+          echo "$OUT3"
+          if echo "$OUT3" | grep -q '10\.9\.9\.9'; then
+            echo "::error::IP 访问被误跳转"; exit 1
+          fi
+
+          echo "全部通过"
+
