@@ -135,8 +135,16 @@ jobs:
             https://api.github.com/repos/komari-monitor/komari/releases/latest | jq -r '.tag_name // empty'); fi
           if [ -z "$C" ]; then C=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
             https://api.github.com/repos/cloudflare/cloudflared/releases/latest | jq -r '.tag_name // empty'); fi
-          # nginx 查不到就保留上次记录，别把已有值覆盖成空
+          # nginx 查不到就自己查一次（push / 手动构建时 check 被跳过）
           if [ -z "$N" ] || [ "$N" = "unknown" ]; then
+            IMG=ghcr.io/komari-monitor/komari:latest
+            docker pull -q "$IMG" || true
+            N=$(timeout 180 docker run --rm --entrypoint sh "$IMG" -c \
+                  'apk update >/dev/null 2>&1; apk search -x -q nginx | head -1' 2>/dev/null \
+                | sed -n 's/^nginx-\(.*\)$/\1/p' | head -1)
+          fi
+          # 还是查不到就保留上次记录，别把已有值覆盖成空
+          if [ -z "$N" ]; then
             if [ -f versions.lock ]; then . ./versions.lock; fi
             N="${LOCK_NGINX:-}"
           fi
