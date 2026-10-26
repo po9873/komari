@@ -271,6 +271,32 @@ echo | openssl s_client -connect 192.0.2.10:443 -servername komari.example.com 2
 
 `notAfter` 已经是新日期就对了。到期前 30 天还没变，说明续期挂了——盯这一条就够，不用翻日志。
 
+### 机器上已经装过客户端的话，先确认它指向这里
+
+不用重装，先看三件事对不对（`certbot` 和 `acme.sh` 各一套，跑你有的那个）：
+
+```bash
+# certbot
+sudo certbot certificates
+sudo grep -E 'webroot_path|authenticator|renew_hook' /etc/letsencrypt/renewal/*.conf
+sudo crontab -l 2>/dev/null | grep -i certbot; systemctl list-timers --all | grep -i certbot
+
+# acme.sh
+~/.acme.sh/acme.sh --list
+grep -E 'Le_Webroot|Le_RealFullChainPath|Le_ReloadCmd' ~/.acme.sh/*/*.conf
+crontab -l | grep acme
+```
+
+对照这三条：
+
+| 要看什么 | 对的形态 | 不对会怎样 |
+|---|---|---|
+| `webroot_path` / `Le_Webroot` | **宿主机上** `.../komari/acme`，也就是容器 `/acme` 的那个源目录 | 挑战文件写到别处，CA 抓不到，续期失败 |
+| `renew_hook` / `Le_ReloadCmd` | 里有 `docker exec komari nginx -s reload` | 证书换了、nginx 还在用内存里的旧证书，**到期照崩** |
+| cron / systemd timer | 存在且没被注释 | 没有触发，90 天后原地过期 |
+
+三条都对，再跑一次 `--dry-run`。只看到“续期成功”不算数——那只证明 CA 给了证书，不证明文件进了容器、更不证明 nginx 换上了。
+
 ## 局域网访问不绕 Cloudflare
 
 面板生成的安装命令，用的是「你在浏览器里访问的那个地址」。所以内网设备如果用域名打开面板，复制出来的命令就是域名 —— 内网机器装 agent 时会先出公网、绕一圈 Cloudflare 再回来，慢且容易失败。
