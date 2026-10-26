@@ -280,8 +280,12 @@ jobs:
           if ! echo "$PAGE" | grep -q 'var b="'; then
             diag "注入的脚本内容为空"; docker rm -f ktoggle; exit 1
           fi
-          if ! echo "$PAGE" | grep -o 'var b="[^"]*"' | sed 's/var b="//; s/"$//' | base64 -d 2>/dev/null | grep -q 'wb-lan-switch'; then
-            diag "内联脚本还原失败（分块拼接可能出错）"; docker rm -f ktoggle; exit 1
+          if ! echo "$PAGE" | grep -o 'var b="[^"]*"' | sed 's/var b="//; s/"$//' | base64 -d 2>/dev/null | grep -qE 'wb-lan-(host|switch)'; then
+            diag "内联脚本还原失败（分块拼接可能出错，或内容里看不到开关标记）"; docker rm -f ktoggle; exit 1
+          fi
+          # 开关的下半截：闭合 shadow root + 2 秒自检，缺了就说明文件被改坏了
+          if ! echo "$PAGE" | grep -o 'var b="[^"]*"' | sed 's/var b="//; s/"$//' | base64 -d 2>/dev/null | grep -q 'attachShadow'; then
+            diag "注入的脚本里没有 attachShadow，可能不是防拆版"; docker rm -f ktoggle; exit 1
           fi
           TOUT=$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' \
                  -H 'Host: panel.example.com' -H 'Accept: text/html' "http://$TIP/")
