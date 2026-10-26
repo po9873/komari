@@ -10,8 +10,7 @@ on:
 
 jobs:
   check:
-    # 只有定时任务才做版本比对；push / 手动直接进 build
-    if: github.event_name == 'schedule'
+    # 每次都跑（几秒钟），版本比对只在定时任务里决定要不要构建
     runs-on: ubuntu-latest
     outputs:
       changed: ${{ steps.diff.outputs.changed }}
@@ -132,28 +131,16 @@ jobs:
 
       - name: 记录本次上游版本（防止下次重复构建）
         run: |
-          # push / 手动构建时 check 被跳过，这里自己查一遍 komari / cloudflared
           K="${{ needs.check.outputs.komari }}"
           C="${{ needs.check.outputs.cloudflared }}"
           N="${{ needs.check.outputs.nginx }}"
-          if [ -z "$K" ]; then K=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
-            https://api.github.com/repos/komari-monitor/komari/releases/latest | jq -r '.tag_name // empty'); fi
-          if [ -z "$C" ]; then C=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
-            https://api.github.com/repos/cloudflare/cloudflared/releases/latest | jq -r '.tag_name // empty'); fi
-          # nginx 查不到就自己查一次（push / 手动构建时 check 被跳过）
-          if [ -z "$N" ] || [ "$N" = "unknown" ]; then
-            for repo in main community; do
-              if [ -n "$N" ]; then break; fi
-              N=$(curl -fsSL --retry 2 --max-time 30 \
-                    "https://dl-cdn.alpinelinux.org/alpine/v3.21/${repo}/x86_64/APKINDEX.tar.gz" \
-                  | tar -xzO APKINDEX 2>/dev/null \
-                  | awk -F: '/^P:nginx$/{f=1;next} f&&/^V:/{print $2;exit}')
-            done
-          fi
-          # 还是查不到就保留上次记录，别把已有值覆盖成空
-          if [ -z "$N" ]; then
+          echo "本次: komari=${K:-?} cloudflared=${C:-?} nginx=${N:-?}"
+          # 查不到就保留上次记录，别把已有值覆盖成空
+          if [ -z "$N" ] || [ "$N" = "unknown" ] || [ -z "$K" ] || [ "$K" = "unknown" ]; then
             if [ -f versions.lock ]; then . ./versions.lock; fi
-            N="${LOCK_NGINX:-}"
+            if [ -z "$N" ] || [ "$N" = "unknown" ]; then N="${LOCK_NGINX:-}"; fi
+            if [ -z "$K" ] || [ "$K" = "unknown" ]; then K="${LOCK_KOMARI:-}"; fi
+            if [ -z "$C" ] || [ "$C" = "unknown" ]; then C="${LOCK_CLOUDFLARED:-}"; fi
           fi
           printf 'LOCK_KOMARI=%s\nLOCK_CLOUDFLARED=%s\nLOCK_NGINX=%s\n' \
             "${K:-unknown}" "${C:-unknown}" "${N}" > versions.lock
