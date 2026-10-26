@@ -10,7 +10,13 @@
 - `.github/workflows/build.yml` — push 自动构建；定时检查上游（komari / cloudflared），有新版本才构建，没更新直接跳过
 
 ## 构建 / 运行
-- push 到 main 自动构建：`ghcr.io/<你>/komari-all-in-one:latest`
+- push 到 main 自动构建，同时推到两个仓库：
+  - Docker Hub：`docker.io/<你的DockerHub用户名>/komari-all-in-one:latest`
+  - GHCR：`ghcr.io/<你>/komari-all-in-one:latest`
+- 要用 Docker Hub，需在仓库 **Settings → Secrets and variables → Actions** 里加两个 secret：
+  - `DOCKERHUB_USERNAME` — Docker Hub 用户名
+  - `DOCKERHUB_TOKEN` — Docker Hub 的 Access Token（hub.docker.com → Account settings → Security → New Access Token，权限给 Read & Write）
+  - 未配置这两个 secret 时，工作流只推 GHCR，不会报错。
 - 本地构建：`docker build -t komari-all-in-one .`
 - 运行：跟原来三个容器时一样，把这个镜像替换掉那三个容器即可；网络、IP/MAC、`ADMIN_*`、`TUNNEL_TOKEN`、挂载目录都按你本机原样传。
 
