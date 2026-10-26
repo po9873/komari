@@ -1,0 +1,168 @@
+<!--
+  局域网端点上报表（内网上报）
+
+  用法：面板 → 设置 → 自定义美化 → 自定义 Body，把下面整段脚本（含标签）粘进去保存。
+  把 LAN 改成你自己的内网地址（面板在内网的访问地址），其它不用动。
+
+  效果：节点「一键部署指令」弹窗里会多一个「局域网设备（内网上报）」勾选；
+  勾上时生成的命令、以及复制到剪贴板的内容，都会把公网域名换成内网地址。
+-->
+
+<script>
+(function () {
+  'use strict';
+
+  // ↓↓↓ 只改这一行：你的面板在局域网里的访问地址 ↓↓↓
+  var LAN = 'http://192.168.1.10:25774';
+  // ↑↑↑ 只改这一行 ↑↑↑
+
+  var KEY = 'komari_lan_ep_checked';
+  var WAN = location.origin; // 当前访问地址，外网访问时就是公网域名
+
+  function isChecked() {
+    try { return localStorage.getItem(KEY) === '1'; } catch (e) { return false; }
+  }
+  function setChecked(v) {
+    try { localStorage.setItem(KEY, v ? '1' : '0'); } catch (e) {}
+  }
+  function target() { return isChecked() ? LAN : WAN; }
+
+  function rewrite(s) {
+    if (typeof s !== 'string') return s;
+    if (isChecked()) return s.split(WAN).join(LAN);
+    return s.split(LAN).join(WAN);
+  }
+
+  function looksLikeCommand(text) {
+    return /install\.sh|install\.ps1|sudo bash|KOMARI_ENDPOINT|komari-agent/i.test(text || '');
+  }
+
+  function walk(node) {
+    if (node.nodeType === 3) {
+      var v = node.nodeValue;
+      if (!v) return;
+      var hit = v.indexOf(WAN) !== -1 || v.indexOf(LAN) !== -1;
+      if (!hit) return;
+      var root = node.parentElement;
+      var ctx = (root ? root.textContent : '') || '';
+      if (looksLikeCommand(ctx) || looksLikeCommand(v)) {
+        var nv = rewrite(v);
+        if (nv !== v) node.nodeValue = nv;
+      }
+      return;
+    }
+    if (node.nodeType !== 1) return;
+    if (node.tagName === 'SCRIPT' || node.tagName === 'STYLE') return;
+    for (var i = 0; i < node.childNodes.length; i++) walk(node.childNodes[i]);
+  }
+
+  function hookClipboard() {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      var orig = navigator.clipboard.writeText.bind(navigator.clipboard);
+      navigator.clipboard.writeText = function (t) {
+        return orig(typeof t === 'string' ? rewrite(t) : t);
+      };
+    }
+    document.addEventListener('copy', function (e) {
+      try {
+        var t = e.clipboardData ? e.clipboardData.getData('text/plain') : '';
+        if (t && (t.indexOf(WAN) !== -1 || t.indexOf(LAN) !== -1)) {
+          e.clipboardData.setData('text/plain', rewrite(t));
+          e.preventDefault();
+        }
+      } catch (err) {}
+    }, true);
+  }
+
+  function injectCheckbox() {
+    if (document.getElementById('kmt-lan-label')) return true;
+
+    var all = document.querySelectorAll('label,span,div');
+    var anchor = null;
+    for (var i = 0; i < all.length; i++) {
+      var t = (all[i].textContent || '').trim();
+      if ((t === '禁用远程控制' || t === 'Disable remote control') && all[i].offsetParent !== null) {
+        anchor = all[i].closest('label') || all[i];
+        break;
+      }
+    }
+
+    var grid = null;
+    if (anchor) {
+      grid = anchor.parentElement && anchor.parentElement.parentElement;
+      if (!grid || grid === document.body) grid = anchor.parentElement;
+    }
+
+    var label = document.createElement('label');
+    label.id = 'kmt-lan-label';
+    label.style.cssText = 'display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none;white-space:nowrap;';
+
+    var cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.id = 'kmt-lan-cb';
+    cb.checked = isChecked();
+    cb.style.cssText = 'width:14px;height:14px;cursor:pointer;';
+
+    var span = document.createElement('span');
+    span.textContent = '局域网设备（内网上报）';
+    span.style.cssText = 'font-size:13px;';
+
+    label.appendChild(cb);
+    label.appendChild(span);
+
+    if (grid && grid !== document.body) {
+      if (anchor) {
+        var cs = getComputedStyle(anchor);
+        label.style.fontSize = cs.fontSize;
+        label.style.color = cs.color;
+        if (cs.display.indexOf('flex') !== -1) label.style.display = cs.display;
+      }
+      grid.appendChild(label);
+    } else {
+      label.style.cssText += 'position:fixed;right:16px;bottom:16px;z-index:99999;' +
+        'background:#1c1633;color:#e8e2ff;padding:8px 14px;border-radius:999px;' +
+        'border:1px solid #5b4a8a;box-shadow:0 4px 16px rgba(0,0,0,.4);';
+      document.body.appendChild(label);
+    }
+
+    cb.addEventListener('change', function () {
+      setChecked(cb.checked);
+      scan();
+    });
+    return true;
+  }
+
+  var scanning = false;
+  function scan() {
+    if (scanning) return;
+    scanning = true;
+    try {
+      var txt = document.body && document.body.textContent;
+      if (!txt) return;
+      var hasCmd = txt.indexOf('install.sh') !== -1 ||
+                   txt.indexOf('install.ps1') !== -1 ||
+                   txt.indexOf('komari-agent') !== -1;
+      if (!hasCmd) return;
+      injectCheckbox();
+      var cb = document.getElementById('kmt-lan-cb');
+      if (cb && cb.checked !== isChecked()) cb.checked = isChecked();
+      walk(document.body);
+    } finally {
+      scanning = false;
+    }
+  }
+
+  hookClipboard();
+
+  var mo = new MutationObserver(function () { scan(); });
+  function start() {
+    if (document.body) {
+      mo.observe(document.body, { childList: true, subtree: true, characterData: true });
+      scan();
+    } else {
+      setTimeout(start, 300);
+    }
+  }
+  start();
+})();
+</script>
