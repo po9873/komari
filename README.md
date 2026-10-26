@@ -1,23 +1,129 @@
-# komari（all-in-one）
+# komari
 
-komari + nginx + cloudflared 打进一个镜像，supervisord 启动。
-仓库只管打包，网络 / IP / MAC / 密码 / Token 都在你自己的运行环境里给。
+komari + nginx + cloudflared 打进一个镜像，三个进程由 supervisord 一起拉起。
 
 ## 镜像
-- `docker.io/<你的DockerHub用户名>/komari:latest`
-- `ghcr.io/<你>/komari:latest`（备份）
 
-## 文件
-- `Dockerfile` — 官方 komari 镜像 + nginx + cloudflared + supervisor
-- `supervisord.conf` — 拉起三个进程
-- `entrypoint.sh` — 入口
-- `.github/workflows/build.yml` — 每天查上游（komari / cloudflared / nginx），有更新才构建推送；也可手动 Run workflow
+```
+po9873/komari:latest
+```
 
-## 需要的 Secrets
-Settings → Secrets and variables → Actions 里加两个：
-- `DOCKERHUB_USERNAME`
-- `DOCKERHUB_TOKEN`（hub.docker.com → Account settings → Security → New Access Token，Read & Write）
+## 容器里跑什么
+
+| 进程 | 监听 | 作用 |
+|---|---|---|
+| komari | `127.0.0.1:25775` | 面板本体，只在容器内部，不对外 |
+| nginx | `80` | 反代到 `127.0.0.1:25775` |
+| cloudflared | — | 用 `TUNNEL_TOKEN` 建隧道，回源 `127.0.0.1:25775` |
 
 ## 部署
-把原来的三个容器换成一个，IP / MAC / 挂载 / 环境变量照旧。
-komari 只听 `127.0.0.1:25775`，所以原来的 `komari.conf` 和 Cloudflare ingress 都不用改。
+
+### 1. 准备目录和反代配置
+
+```bash
+mkdir -p komari/data && cd komari
+
+cat > nginx.conf <<'EOF'
+server {
+    listen 80;
+    client_max_body_size 50m;
+
+    location / {
+        proxy_pass http://127.0.0.1:25775;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+EOF
+```
+
+要上 TLS 就在这个文件里加 `listen 443 ssl;` 和证书路径，再把证书目录挂进容器。
+
+注意挂载目标是 `/etc/nginx/http.d/default.conf`：镜像里的 nginx 是 alpine 的包，只读 `http.d/*.conf`，`conf.d/` 不生效。
+
+### 2. 写 compose.yml
+
+```yaml
+services:
+  komari:
+    image: po9873/komari:latest
+    container_name: komari
+    restart: unless-stopped
+    ports:
+      - "80:80"                   # 换成 "8080:80" 就用 8080 访问
+    volumes:
+      - ./data:/app/data
+      - ./nginx.conf:/etc/nginx/http.d/default.conf:ro
+    environment:
+      ADMIN_USERNAME: admin       # 首次启动时创建的管理员
+      ADMIN_PASSWORD: 换成你的密码
+      TUNNEL_TOKEN: 换成你的隧道Token
+      GODEBUG: disablethp=1
+```
+
+`TUNNEL_TOKEN` 必填：cloudflared 靠它建隧道，留空会导致 supervisord 拉不起这个进程。
+
+### 3. 启动
+
+```bash
+docker compose up -d
+docker compose logs -f --tail=50
+```
+
+### 4. 验证
+
+```bash
+docker compose ps
+docker exec komari sh -c 'ps | grep -E "komari|nginx|cloudflared" | grep -v grep'
+curl -I http://127.0.0.1/
+```
+
+三个进程都在、`curl` 返回 `200` 或 `302` 就算起来了。
+
+### 5. 固定 IP / MAC（macvlan）
+
+需要容器在局域网里占固定 IP 时，把 `ports` 去掉，改成挂 macvlan 网络（示例值，换成你自己网络的）：
+
+```yaml
+services:
+  komari:
+    image: po9873/komari:latest
+    container_name: komari
+    restart: unless-stopped
+    mac_address: "02:42:ac:11:00:02"
+    networks:
+      lan:
+        ipv4_address: 192.168.1.100
+    volumes:
+      - ./data:/app/data
+      - ./nginx.conf:/etc/nginx/http.d/default.conf:ro
+    environment:
+      ADMIN_USERNAME: admin
+      ADMIN_PASSWORD: 换成你的密码
+      TUNNEL_TOKEN: 换成你的隧道Token
+      GODEBUG: disablethp=1
+
+networks:
+  lan:
+    external: true
+    name: macvlan0        # 宿主机上已有的 macvlan 网络名
+```
+
+这样容器直接以 `192.168.1.100` 出现在局域网里，nginx 的 80/443 直接可访问，不再需要 `ports`。
+
+## 更新
+
+```bash
+docker compose pull && docker compose up -d
+```
+
+镜像重建后三个进程一起换成新版本。上游 komari / cloudflared / nginx 有新版本时，本仓库的工作流会在每天检查后自动构建新镜像。
+
+## 只用 nginx 或只用隧道
+
+想删掉某个进程，就改 `supervisord.conf` 删掉对应的 `[program:xxx]` 段，然后自己 `docker build` 一个镜像。直接用官方镜像则没有任何裁剪。
