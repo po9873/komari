@@ -228,9 +228,10 @@ export CF_Account_ID="你的 Account ID"        # 用 Zone 级 Token 时可留�
 
 三样东西必须同时成立，缺一样都会静默失败：
 
-1. compose 里挂上（只读够用——写文件的是宿主机上的续期客户端，容器只负责把它吐出去）：
+1. compose 挂上。宿主机上的客户端往外写文件时，容器侧 `:ro` 就够；**如果续期跑在另一个容器里，两个目录都要 rw**：
    ```yaml
          - ./acme:/acme:ro
+         - ./certs:/certs:ro
    ```
 2. **80 和 443 的 server 块里都要**有这段（LE 可能跟着 80 上的跳转去 443 取挑战文件）：
    ```nginx
@@ -252,6 +253,50 @@ certbot certonly --webroot -w /你的路径/acme -d komari.example.com \
 ```bash
 0 3 * * * certbot renew --quiet
 ```
+
+### 方式二 · 附：不想在宿主机上装东西，就用容器跑
+
+宿主机上一件东西都不用装，续期也全靠容器自己循环。第一步先签：
+
+```bash
+docker run --rm \
+  -v $PWD/acme:/acme -v $PWD/certs:/certs -v $PWD/acme-sh:/acme.sh \
+  neilpang/acme.sh --issue -w /acme -d komari.example.com --server letsencrypt \
+  --key-file /certs/privkey.pem --fullchain-file /certs/fullchain.pem
+```
+
+签完 `reload` 一次（`docker exec komari nginx -s reload`），之后把它交给下面这个常驻容器：
+
+```yaml
+services:
+  acme:
+    image: neilpang/acme.sh:latest
+    container_name: acme-renew
+    restart: always
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        apk add --no-cache docker-cli >/dev/null 2>&1
+        while true; do
+          echo "[cron] $(date -Iseconds)"
+          acme.sh --cron 2>&1 | tail -4
+          docker exec komari nginx -s reload || echo "[warn] reload failed"
+          sleep 86400
+        done
+    volumes:
+      - ./acme:/acme
+      - ./certs:/certs
+      - ./acme-sh:/acme.sh
+      - /var/run/docker.sock:/var/run/docker.sock
+```
+
+三个关键点，缺一个就不成立：
+
+- **`./acme-sh` 必须挂在容器的 `/acme.sh`**（这是它默认的配置目录）。挂在别的路径上、再用 `--home` 指定，会触发它的自升级逻辑去找一个不存在的文件，然后中途退出，cron 一次都跑不完。
+- **`./certs`、`./acme` 要 rw**：这个容器自己负责写文件和装证书，不能 `:ro`。
+- **`/var/run/docker.sock` 是给 `docker exec ... nginx -s reload` 用的**。Cert 续完必须 reload，否则 nginx 还拿着内存里的旧证书。代价是**这个容器等价于拥有宿主机 root**，只用自己签出来的镜像，别换成来路不明的。
+
+首次签发时用的是容器内的 `/certs/...` 路径，acme.sh 会把目标路径记进配置，之后每次 `--cron` 都按这个路径重装 —— 所以两边 bind 的目标路径必须写成一样的，别一边 `/certs` 一边改别的名字。
 
 ### 验证续期是真的会跑
 
