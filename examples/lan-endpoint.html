@@ -2,9 +2,10 @@
   局域网端点上报表（内网上报）
 
   用法：面板 → 设置 → 自定义美化 → 自定义 Body，把下面整段脚本（含标签）粘进去保存。
-  把 LAN 改成你自己的内网地址（面板在内网的访问地址），其它不用动。
+  不需要改任何值：第一次勾选「局域网设备（内网上报）」时，会弹框让你填一次内网地址，
+  之后存在浏览器 localStorage 里，双击那个勾选框可以随时改。
 
-  效果：节点「一键部署指令」弹窗里会多一个「局域网设备（内网上报）」勾选；
+  效果：节点「一键部署指令」弹窗里多一个「局域网设备（内网上报）」勾选；
   勾上时生成的命令、以及复制到剪贴板的内容，都会把公网域名换成内网地址。
 -->
 
@@ -12,25 +13,47 @@
 (function () {
   'use strict';
 
-  // ↓↓↓ 只改这一行：你的面板在局域网里的访问地址 ↓↓↓
-  var LAN = 'http://192.168.1.10:25774';
-  // ↑↑↑ 只改这一行 ↑↑↑
+  var KEY_ON = 'komari_lan_ep_on';   // 勾选状态
+  var KEY_EP = 'komari_lan_ep';      // 内网地址
+  var WAN = location.origin;         // 当前访问地址，外网访问时就是公网域名
 
-  var KEY = 'komari_lan_ep_checked';
-  var WAN = location.origin; // 当前访问地址，外网访问时就是公网域名
+  function get(k) {
+    try { return localStorage.getItem(k) || ''; } catch (e) { return ''; }
+  }
+  function put(k, v) {
+    try { localStorage.setItem(k, v); } catch (e) {}
+  }
 
-  function isChecked() {
-    try { return localStorage.getItem(KEY) === '1'; } catch (e) { return false; }
+  function enabled() { return get(KEY_ON) === '1'; }
+  function endpoint() { return get(KEY_EP); }
+
+  // 弹框填内网地址，留空或取消则返回 false
+  function askEndpoint() {
+    var def = endpoint() || location.origin;
+    var v = window.prompt(
+      '内网访问地址（内网设备实际访问面板用的地址，按你自己的填）',
+      def
+    );
+    if (v === null) return !!endpoint();
+    v = (v || '').trim().replace(/\/+$/, '');
+    if (!v) return !!endpoint();
+    if (!/^https?:\/\//i.test(v)) v = 'http://' + v;
+    put(KEY_EP, v);
+    return true;
   }
-  function setChecked(v) {
-    try { localStorage.setItem(KEY, v ? '1' : '0'); } catch (e) {}
-  }
-  function target() { return isChecked() ? LAN : WAN; }
 
   function rewrite(s) {
     if (typeof s !== 'string') return s;
-    if (isChecked()) return s.split(WAN).join(LAN);
-    return s.split(LAN).join(WAN);
+    var lan = endpoint();
+    if (!lan) return s;
+    return enabled() ? s.split(WAN).join(lan) : s.split(lan).join(WAN);
+  }
+
+  function hit(s) {
+    if (typeof s !== 'string' || !s) return false;
+    if (s.indexOf(WAN) !== -1) return true;
+    var lan = endpoint();
+    return !!lan && s.indexOf(lan) !== -1;
   }
 
   function looksLikeCommand(text) {
@@ -40,9 +63,7 @@
   function walk(node) {
     if (node.nodeType === 3) {
       var v = node.nodeValue;
-      if (!v) return;
-      var hit = v.indexOf(WAN) !== -1 || v.indexOf(LAN) !== -1;
-      if (!hit) return;
+      if (!hit(v)) return;
       var root = node.parentElement;
       var ctx = (root ? root.textContent : '') || '';
       if (looksLikeCommand(ctx) || looksLikeCommand(v)) {
@@ -66,7 +87,7 @@
     document.addEventListener('copy', function (e) {
       try {
         var t = e.clipboardData ? e.clipboardData.getData('text/plain') : '';
-        if (t && (t.indexOf(WAN) !== -1 || t.indexOf(LAN) !== -1)) {
+        if (hit(t)) {
           e.clipboardData.setData('text/plain', rewrite(t));
           e.preventDefault();
         }
@@ -74,8 +95,14 @@
     }, true);
   }
 
+  function syncTitle(label) {
+    var ep = endpoint();
+    label.title = '双击可修改内网地址' + (ep ? '\n当前：' + ep : '\n还没设置，勾选时会让你填');
+  }
+
   function injectCheckbox() {
-    if (document.getElementById('kmt-lan-label')) return true;
+    var exist = document.getElementById('kmt-lan-label');
+    if (exist) { syncTitle(exist); return true; }
 
     var all = document.querySelectorAll('label,span,div');
     var anchor = null;
@@ -100,7 +127,7 @@
     var cb = document.createElement('input');
     cb.type = 'checkbox';
     cb.id = 'kmt-lan-cb';
-    cb.checked = isChecked();
+    cb.checked = enabled();
     cb.style.cssText = 'width:14px;height:14px;cursor:pointer;';
 
     var span = document.createElement('span');
@@ -126,9 +153,20 @@
     }
 
     cb.addEventListener('change', function () {
-      setChecked(cb.checked);
+      if (cb.checked && !endpoint()) {
+        if (!askEndpoint()) { cb.checked = false; put(KEY_ON, '0'); return; }
+      }
+      put(KEY_ON, cb.checked ? '1' : '0');
+      syncTitle(label);
       scan();
     });
+
+    label.addEventListener('dblclick', function (e) {
+      e.preventDefault();
+      if (askEndpoint()) { syncTitle(label); scan(); }
+    });
+
+    syncTitle(label);
     return true;
   }
 
@@ -145,7 +183,7 @@
       if (!hasCmd) return;
       injectCheckbox();
       var cb = document.getElementById('kmt-lan-cb');
-      if (cb && cb.checked !== isChecked()) cb.checked = isChecked();
+      if (cb && cb.checked !== enabled()) cb.checked = enabled();
       walk(document.body);
     } finally {
       scanning = false;
