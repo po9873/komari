@@ -91,40 +91,6 @@ curl -I http://127.0.0.1/
 
 三个进程都在、`curl` 返回 `200` 或 `302` 就算起来了。
 
-### 5. 固定 IP / MAC（macvlan）
-
-需要容器在局域网里占固定 IP 时，把 `ports` 去掉，改成挂 macvlan 网络（示例值，换成你自己网络的）：
-
-```yaml
-services:
-  komari:
-    image: po9873/komari:latest
-    container_name: komari
-    restart: unless-stopped
-    mac_address: "02:00:00:00:00:01"   # 示例值（本地管理地址），换成你自己的
-    networks:
-      lan:
-        ipv4_address: 192.0.2.10          # 示例值（RFC 5737 文档专用），换成你自己的
-    volumes:
-      - ./data:/app/data
-      - ./nginx.conf:/etc/nginx/http.d/default.conf:ro
-    environment:
-      ADMIN_USERNAME: admin
-      ADMIN_PASSWORD: 换成你的密码
-      TUNNEL_TOKEN: 换成你的隧道Token
-      GODEBUG: disablethp=1
-      KOMARI_LAN_AUTO: "1"        # 打开内网直连（见下一节）
-
-networks:
-  lan:
-    external: true
-    name: macvlan0        # 宿主机上已有的 macvlan 网络名
-```
-
-这样容器直接以你指定的 IP 出现在局域网里，nginx 的 80/443 直接可访问，不再需要 `ports`。
-
-上面两处用的是文档示例值（`192.0.2.0/24` 是 RFC 5737 保留给文档的网段，不属于任何人的内网），换成你自己网络的地址即可。
-
 ## 局域网访问不再绕 Cloudflare
 
 这是镜像自带的行为，**不需要装任何浏览器插件，也不用往面板里粘脚本**。
@@ -165,7 +131,7 @@ networks:
 
   之后内网用域名打开会自动落到 IP，公网那边照旧走隧道，两边互不影响。
 
-注意 `KOMARI_LAN_AUTO` 只在容器有**内网可达的 IP** 时才有意义（macvlan 或 host 网络）。默认的 bridge + `ports` 映射，容器 IP 是 `172.x`，内网其它设备连不上，别开。
+注意 `KOMARI_LAN_AUTO` 只在容器有**内网可达的 IP** 时才有意义（容器直接接入局域网的那种）。默认的 bridge + `ports` 映射，容器 IP 是 `172.x`，内网其它设备连不上，别开。
 
 如果之前往面板「设置 → 自定义美化 → 自定义 Body」里粘过切换地址的脚本，升级后请把那段清空：镜像是服务端直接换地址，脚本再改一遍会互相打架。
 
