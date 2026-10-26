@@ -228,12 +228,17 @@
     true
   );
 
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    var nativeWrite = navigator.clipboard.writeText.bind(navigator.clipboard);
-    navigator.clipboard.writeText = function (t) {
-      return nativeWrite(enabled ? rewrite(String(t)) : t);
-    };
-  }
+  // 面板上的「复制」按钮走的是 clipboard API，这里包一层
+  // 浏览器可能不允许改写（严格模式下会抛错），所以必须吞掉异常，
+  // 否则后面的界面就渲染不出来
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      var nativeWrite = navigator.clipboard.writeText.bind(navigator.clipboard);
+      navigator.clipboard.writeText = function (t) {
+        return nativeWrite(enabled ? rewrite(String(t)) : t);
+      };
+    }
+  } catch (e) {}
 
   /* ---------------- 启动 ---------------- */
 
