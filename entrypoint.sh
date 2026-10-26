@@ -39,19 +39,34 @@ if [ "${KOMARI_LAN_TOGGLE:-0}" = "1" ]; then
         authority="$lan_host:${KOMARI_LAN_PORT:-80}"
         payload=$(base64 < "$TOGGLE_JS" | tr -d '\n')
 
+        # nginx 单个 token 有 4KB 上限，脚本要切块放进 map，再拼成一个变量用
         cat > "$LAN_CONF" <<EOF
 # 由 entrypoint 生成：往面板首页注入「安装命令用内网地址」勾选框
-# 脚本内容已内联（base64），不依赖外部文件，也不需要浏览器插件
+# 脚本内容切成小块放在 map 里（nginx 单个参数不能超过 4KB），最后拼成 \$wb_inject
 map \$host \$wb_redirect_lan { default 0; }
 map \$host \$wb_lan_authority { default "$authority"; }
 
-sub_filter_types text/html;
+EOF
+        rest="$payload"
+        idx=0
+        refs=""
+        while [ -n "$rest" ]; do
+            part=$(printf '%s' "$rest" | cut -c1-3000)
+            rest=$(printf '%s' "$rest" | cut -c3001-)
+            idx=$((idx + 1))
+            printf 'map $host $wb_inj%s { default "%s"; }\n' "$idx" "$part" >> "$LAN_CONF"
+            refs="${refs}\$wb_inj${idx}"
+        done
+
+        cat >> "$LAN_CONF" <<EOF
+map \$host \$wb_inject { default "$refs"; }
+
 sub_filter_once on;
-sub_filter '</body>' '<script>(function(){try{window.__WB_LAN__={authority:"$authority"};var b="$payload";var c=new TextDecoder().decode(Uint8Array.from(atob(b),function(k){return k.charCodeAt(0)}));var s=document.createElement("script");s.textContent=c;document.body.appendChild(s);}catch(e){}})();</script></body>';
+sub_filter '</body>' '<script>(function(){try{window.__WB_LAN__={authority:"$authority"};var b="\$wb_inject";var c=new TextDecoder().decode(Uint8Array.from(atob(b),function(k){return k.charCodeAt(0)}));var s=document.createElement("script");s.textContent=c;document.body.appendChild(s);}catch(e){}})();</script></body>';
 # 上游如果 gzip，sub_filter 改不了，这里统一要明文
 proxy_set_header Accept-Encoding "";
 EOF
-        echo "[entrypoint] 内网地址勾选框已启用 -> http://$authority"
+        echo "[entrypoint] 内网地址勾选框已启用 -> http://$authority（脚本 ${idx} 块）"
     fi
 elif [ "${KOMARI_LAN_AUTO:-0}" = "1" ]; then
     # ── 模式二：不带勾选框，内网用域名访问时直接 302 到容器地址
