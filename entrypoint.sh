@@ -5,17 +5,7 @@ set -e
 LAN_CONF=/etc/nginx/http.d/00-lan.conf
 TOGGLE_JS=/usr/local/share/wb/lan-toggle.js
 
-# 两种模式都没开时也要写一份，保证挂载的 default.conf 里
-# if ($wb_redirect_lan) 不会因为变量未定义而让 nginx 起不来
-lan_disabled() {
-    cat > "$LAN_CONF" <<'EOF'
-# 内网相关功能均未启用（KOMARI_LAN_TOGGLE / KOMARI_LAN_AUTO 都不是 1）
-map $host $wb_redirect_lan { default 0; }
-map $host $wb_lan_authority { default ""; }
-EOF
-}
-
-# 容器自己的内网地址：启动时探测，镜像里不写死任何 IP
+# 容器自身的内网地址：启动时探测，镜像里不写死任何 IP（仅供可选的 302 跳转用）
 detect_host() {
     lan_host="${KOMARI_LAN_HOST:-auto}"
     if [ "$lan_host" = "auto" ] || [ -z "$lan_host" ]; then
@@ -28,20 +18,23 @@ detect_host() {
     fi
 }
 
-if [ "${KOMARI_LAN_TOGGLE:-0}" = "1" ]; then
-    # ── 模式一：面板「一键部署指令」页里给一个勾选框，安装命令改用当前访问地址
-    # 注意：地址不再写死容器 IP，而是用浏览器里的 window.location.host（用户当前打开面板用的地址），
-    #       所以这里不再依赖容器 IPv4 探测，任何能跑起来的环境都能开。
-    payload=$(base64 < "$TOGGLE_JS" | tr -d '\n')
-
-    # nginx 单个 token 有 4KB 上限，脚本要切块放进 map，再拼成一个变量用
-    cat > "$LAN_CONF" <<'EOF'
-# 由 entrypoint 生成：往「一键部署指令」页注入地址切换勾选框
-# 脚本内容切成小块放在 map 里（nginx 单个参数不能超过 4KB），最后拼成 $wb_inject
-# 地址不写死：前端用 window.location.host（当前访问地址），镜像到谁手里都是谁自己的地址
+# 始终注入「安装命令自动改用当前访问地址」脚本（无 UI，不写死 IP）
+# 这个脚本不渲染任何控件，只在前端把安装命令里的面板地址换成 location.origin。
+# KOMARI_LAN_INJECT=0 可关掉（关掉后命令永远是面板默认的地址）。
+setup_lan_script() {
+    if [ "${KOMARI_LAN_INJECT:-1}" = "0" ] || [ ! -f "$TOGGLE_JS" ]; then
+        cat > "$LAN_CONF" <<'EOF'
 map $host $wb_redirect_lan { default 0; }
 map $host $wb_lan_authority { default ""; }
-
+EOF
+        echo "[entrypoint] 安装命令自动改写已关闭（KOMARI_LAN_INJECT=0）"
+        return
+    fi
+    payload=$(base64 < "$TOGGLE_JS" | tr -d '\n')
+    cat > "$LAN_CONF" <<'EOF'
+# 镜像内置：安装命令自动改用当前访问地址（无 UI、不暴露内网 IP）
+map $host $wb_redirect_lan { default 0; }
+map $host $wb_lan_authority { default ""; }
 EOF
     rest="$payload"
     idx=0
@@ -62,28 +55,30 @@ sub_filter '</body>' '<script>(function(){try{var b="\$wb_inject";var c=new Text
 # 上游如果 gzip，sub_filter 改不了，这里统一要明文
 proxy_set_header Accept-Encoding "";
 EOF
-    echo "[entrypoint] 内网地址勾选框已启用（脚本 ${idx} 块，使用当前访问地址，不写死 IP）"
-elif [ "${KOMARI_LAN_AUTO:-0}" = "1" ]; then
-    # ── 模式二：不带勾选框，内网用域名访问时直接 302 到容器地址
+    echo "[entrypoint] 已注入：安装命令按当前访问地址自动改写（无 UI）"
+}
+
+# 可选增强：内网域名访问时 302 跳转到容器地址（同样无 UI）
+# 设 KOMARI_LAN_AUTO=1 开启；不需要就不开。
+setup_lan_redirect() {
+    if [ "${KOMARI_LAN_AUTO:-0}" != "1" ]; then
+        return
+    fi
     detect_host
-
-    # 默认跟着 nginx 实际监听的端口（macvlan 直连时就是它，不用配）
     lan_port="${KOMARI_LAN_PORT:-}"
-
     if [ -z "$lan_host" ]; then
-        echo "[entrypoint] KOMARI_LAN_AUTO=1 但没探测到容器的 IPv4，内网跳转已跳过" >&2
-        lan_disabled
+        echo "[entrypoint] KOMARI_LAN_AUTO=1 但没探测到容器 IPv4，内网跳转已跳过" >&2
+        return
+    fi
+    if [ -z "$lan_port" ]; then
+        lan_authority="$lan_host:\$server_port"
+    elif [ "$lan_port" = "80" ]; then
+        lan_authority="$lan_host"
     else
-        if [ -z "$lan_port" ]; then
-            lan_authority="$lan_host:\$server_port"
-        elif [ "$lan_port" = "80" ]; then
-            lan_authority="$lan_host"
-        else
-            lan_authority="$lan_host:$lan_port"
-        fi
+        lan_authority="$lan_host:$lan_port"
+    fi
 
-        cat > "$LAN_CONF" <<EOF
-# 由 entrypoint 生成：容器自身的内网地址
+    cat >> "$LAN_CONF" <<EOF
 map \$http_host \$wb_host_is_ip {
     default 0;
     "~^[0-9]{1,3}(\.[0-9]{1,3}){3}(:[0-9]+)?\$" 1;
@@ -107,10 +102,37 @@ map \$host \$wb_lan_authority {
     default "$lan_authority";
 }
 EOF
-        echo "[entrypoint] 内网跳转已启用 -> http://$lan_authority"
+    echo "[entrypoint] 内网跳转已启用 -> http://$lan_authority"
+}
+
+# 开了内置 ACME、但 /certs 还是空的：先放一张 7 天自签占位证书。
+# 否则 user 的 nginx.conf 里 `listen 443 ssl` 一加载就报找不到 pem，
+# nginx 起不来、整个面板打不开——顺序错了看起来像镜像坏了。
+# acme.sh 签下正式证书后会直接覆盖这两个文件并 reload。
+setup_bootstrap_cert() {
+    [ "${KOMARI_ACME_ENABLED:-0}" = "1" ] || return 0
+    [ -z "${KOMARI_ACME_DOMAIN:-}" ] && return 0
+    crt_dir="${KOMARI_ACME_CERTS:-/certs}"
+    [ -f "$crt_dir/fullchain.pem" ] && return 0
+    mkdir -p "$crt_dir" 2>/dev/null || true
+    if openssl req -x509 -nodes -newkey rsa:2048 -days 7 \
+        -subj "/CN=${KOMARI_ACME_DOMAIN}" \
+        -keyout "$crt_dir/privkey.pem" -out "$crt_dir/fullchain.pem" >/dev/null 2>&1; then
+        chmod 600 "$crt_dir/privkey.pem" 2>/dev/null || true
+        echo "[entrypoint] $crt_dir 是空的，先放了张 7 天自签占位证书，等 acme.sh 换正式证书"
+    else
+        echo "[entrypoint] 占位证书没生成出来（$crt_dir 可写吗？）" >&2
     fi
+}
+
+setup_bootstrap_cert
+setup_lan_script
+setup_lan_redirect
+
+if [ "${KOMARI_ACME_ENABLED:-0}" = "1" ] && [ -n "${KOMARI_ACME_DOMAIN:-}" ]; then
+    echo "[entrypoint] 内置 ACME 已启用：${KOMARI_ACME_DOMAIN} -> ${KOMARI_ACME_CERTS:-/certs}（webroot ${KOMARI_ACME_WEBROOT:-/acme}）"
 else
-    lan_disabled
+    echo "[entrypoint] 内置 ACME 未启用：不签证书、不动 ${KOMARI_ACME_CERTS:-/certs}"
 fi
 
 exec /usr/bin/supervisord -c /etc/supervisord.conf

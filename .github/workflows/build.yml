@@ -246,7 +246,7 @@ jobs:
             echo "::error::IP 访问被误跳转"; exit 1
           fi
 
-          echo "=== 勾选框模式（KOMARI_LAN_TOGGLE=1，不跳转、首页注入开关）"
+          echo "=== 无 UI 模式（不设 KOMARI_LAN_AUTO：不跳转、首页注入自动改写脚本）"
           docker rm -f ktoggle >/dev/null 2>&1 || true
           diag() {
             echo "::error::$1 | logs=$(docker logs ktoggle --tail=25 2>&1 | tr '\n' '|' | cut -c1-900) | ngx=$(docker exec ktoggle nginx -t 2>&1 | tr '\n' '|' | cut -c1-600)"
@@ -255,47 +255,119 @@ jobs:
             -e TUNNEL_TOKEN=0000000000000000000000000000000000000000000000000000000000000000 \
             -e ADMIN_USERNAME=admin \
             -e ADMIN_PASSWORD=test-only-not-a-secret \
-            -e KOMARI_LAN_TOGGLE=1 \
-            -e KOMARI_LAN_HOST=10.9.9.9 \
-            -e KOMARI_LAN_PORT=8080 \
             -v /tmp/default.conf:/etc/nginx/http.d/default.conf:ro \
             "$IMAGE" 2>&1); then
-            echo "::error::toggle 容器启动失败: $(echo "$TROUT" | tr '\n' ' ')"
+            echo "::error::无 UI 模式容器启动失败: $(echo "$TROUT" | tr '\n' ' ')"
             exit 1
           fi
           sleep 15
           TIP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' ktoggle)
           if ! TNG=$(docker exec ktoggle nginx -t 2>&1); then
-            diag "toggle 模式 nginx -t 失败"; docker rm -f ktoggle; exit 1
+            diag "无 UI 模式 nginx -t 失败"; docker rm -f ktoggle; exit 1
           fi
           echo "$TNG"
           if ! PAGE=$(curl -sL --retry 6 --retry-connrefused --retry-delay 3 \
                        -H 'Host: panel.example.com' "http://$TIP/"); then
-            diag "toggle 模式首页取不到（容器 IP=$TIP）"; docker rm -f ktoggle; exit 1
+            diag "无 UI 模式首页取不到（容器 IP=$TIP）"; docker rm -f ktoggle; exit 1
           fi
-          # 注入标记：entrypoint 在 </body> 前塞了 <script>var b="..."</script>，
-          # 里面是 base64 后的 lan-toggle.js；不再依赖已移除的 window.__WB_LAN__ 引导变量
+          # 注入标记：entrypoint 在 </body> 前塞了 <script>var b="..."</script>，里面是 base64 后的脚本
           if ! echo "$PAGE" | grep -q 'var b="'; then
-            diag "首页没有注入开关脚本（找不到 var b= 注入标记），页面开头=$(echo "$PAGE" | tr '\n' ' ' | cut -c1-200)"
+            diag "首页没有注入脚本（找不到 var b= 注入标记），页面开头=$(echo "$PAGE" | tr '\n' ' ' | cut -c1-200)"
             docker rm -f ktoggle; exit 1
           fi
-          if ! echo "$PAGE" | grep -q 'var b="'; then
-            diag "注入的脚本内容为空"; docker rm -f ktoggle; exit 1
+          JS=$(echo "$PAGE" | grep -o 'var b="[^"]*"' | head -1 | sed 's/var b="//; s/"$//' | base64 -d 2>/dev/null || true)
+          if [ -z "$JS" ]; then
+            diag "注入的 base64 解不回来（分块拼接可能出错）"; docker rm -f ktoggle; exit 1
           fi
-          if ! echo "$PAGE" | grep -o 'var b="[^"]*"' | sed 's/var b="//; s/"$//' | base64 -d 2>/dev/null | grep -qE 'wb-lan-(host|switch)'; then
-            diag "内联脚本还原失败（分块拼接可能出错，或内容里看不到开关标记）"; docker rm -f ktoggle; exit 1
+          # 必须是「安装命令自动改写」这一版
+          if ! echo "$JS" | grep -q 'autoRewrite'; then
+            diag "注入的不是自动改写版（缺 autoRewrite 标记）"; docker rm -f ktoggle; exit 1
           fi
-          # 开关的下半截：闭合 shadow root + 2 秒自检，缺了就说明文件被改坏了
-          if ! echo "$PAGE" | grep -o 'var b="[^"]*"' | sed 's/var b="//; s/"$//' | base64 -d 2>/dev/null | grep -q 'attachShadow'; then
-            diag "注入的脚本里没有 attachShadow，可能不是防拆版"; docker rm -f ktoggle; exit 1
+          if ! echo "$JS" | grep -q -e '--endpoint'; then
+            diag "自动改写脚本里没有 --endpoint 改写逻辑"; docker rm -f ktoggle; exit 1
+          fi
+          # 硬要求：前端不能出现任何开关控件（不得有 shadow root / 宿主节点 / 造元素）
+          if echo "$JS" | grep -qE 'attachShadow|wb-lan-host|createElement\("(div|button|input|label|section)"\)'; then
+            diag "注入脚本里还留着 UI 控件，前端会看见"; docker rm -f ktoggle; exit 1
           fi
           TOUT=$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' \
                  -H 'Host: panel.example.com' -H 'Accept: text/html' "http://$TIP/")
-          echo "勾选框模式: $TOUT"
+          echo "无 UI 模式: $TOUT"
           if echo "$TOUT" | grep -q '10\.9\.9\.9'; then
-            diag "勾选框模式不应跳转，实际 $TOUT"; docker rm -f ktoggle; exit 1
+            diag "没开 KOMARI_LAN_AUTO 却发生了跳转，实际 $TOUT"; docker rm -f ktoggle; exit 1
           fi
           docker rm -f ktoggle >/dev/null 2>&1 || true
+
+          echo "=== 内置 acme.sh（签发/续期在镜像里，不再需要单独的 acme 容器）"
+          if ! docker exec ksmoke test -x /acme.sh/acme.sh; then
+            echo "::error::镜像里没有 /acme.sh/acme.sh"; exit 1
+          fi
+          if ! AVER=$(docker exec ksmoke /acme.sh/acme.sh --version 2>&1 | head -2); then
+            echo "::error::acme.sh --version 跑不起来: $(echo "$AVER" | tr '\n' ' ' | cut -c1-300)"; exit 1
+          fi
+          echo "$AVER"
+          # 没配 ACME 时 acme 进程应正常退出，而不是 FATAL / 反复重启
+          AST=$(docker exec ksmoke supervisorctl status acme 2>&1)
+          echo "$AST"
+          if ! echo "$AST" | grep -q 'EXITED'; then
+            echo "::error::未配置 ACME 时 acme 进程应为 EXITED，实际: $AST"; exit 1
+          fi
+
+          echo "=== 内置 acme 引导（空目录挂载 + 自签占位证书）"
+          cat > /tmp/tls.conf <<'NGINX'
+          server {
+              listen 80;
+              location / { return 200 "http-ok"; }
+          }
+          server {
+              listen 443 ssl;
+              ssl_certificate     /certs/fullchain.pem;
+              ssl_certificate_key /certs/privkey.pem;
+              location / { return 200 "tls-ok"; }
+          }
+          NGINX
+          docker rm -f kacme >/dev/null 2>&1 || true
+          rm -rf /tmp/acmehome /tmp/acmecerts /tmp/acmeweb
+          mkdir -p /tmp/acmehome /tmp/acmecerts /tmp/acmeweb
+          if ! KAOUT=$(docker run -d --name kacme \
+            -e TUNNEL_TOKEN=0000000000000000000000000000000000000000000000000000000000000000 \
+            -e ADMIN_USERNAME=admin \
+            -e ADMIN_PASSWORD=test-only-not-a-secret \
+            -e KOMARI_ACME_ENABLED=1 \
+            -e KOMARI_ACME_DOMAIN=panel.example.com \
+            -v /tmp/tls.conf:/etc/nginx/http.d/default.conf:ro \
+            -v /tmp/acmehome:/acme.sh \
+            -v /tmp/acmecerts:/certs \
+            -v /tmp/acmeweb:/acme \
+            "$IMAGE" 2>&1); then
+            echo "::error::acme 引导容器启动失败: $(echo "$KAOUT" | tr '\n' ' ')"; exit 1
+          fi
+          sleep 15
+          # /acme.sh 挂成空目录后，镜像里那份 acme.sh 必须被铺回去
+          if ! docker exec kacme test -x /acme.sh/acme.sh; then
+            echo "::error::/acme.sh 挂成空目录后没把内置 acme.sh 铺回去"
+            docker logs kacme --tail=30; docker rm -f kacme; exit 1
+          fi
+          # /certs 是空的 + conf 里有 listen 443 ssl：靠占位证书才能启动
+          if ! docker exec kacme sh -c 'test -s /certs/fullchain.pem && test -s /certs/privkey.pem'; then
+            echo "::error::/certs 为空时没生成自签占位证书（nginx 会因找不到 pem 起不来）"
+            docker logs kacme --tail=30; docker rm -f kacme; exit 1
+          fi
+          SUBJ=$(docker exec kacme openssl x509 -in /certs/fullchain.pem -noout -subject 2>&1)
+          echo "占位证书: $SUBJ"
+          if ! echo "$SUBJ" | grep -q 'panel.example.com'; then
+            echo "::error::占位证书 CN 不是配置的域名"; docker rm -f kacme; exit 1
+          fi
+          if ! docker exec kacme nginx -t 2>&1; then
+            echo "::error::占位证书就位后 nginx -t 仍失败（443 段加载不了）"
+            docker logs kacme --tail=30; docker rm -f kacme; exit 1
+          fi
+          KAST=$(docker exec kacme supervisorctl status acme 2>&1)
+          echo "$KAST"
+          if echo "$KAST" | grep -qE 'FATAL|BACKOFF'; then
+            echo "::error::配了 ACME 后 acme 进程起不来: $KAST"; docker rm -f kacme; exit 1
+          fi
+          docker rm -f kacme >/dev/null 2>&1 || true
 
           echo "全部通过"
 
