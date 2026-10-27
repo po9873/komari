@@ -427,7 +427,7 @@ nslookup komari.example.com 223.5.5.5          # 应该返回 Cloudflare 的地�
 | `KOMARI_LAN_INJECT` | `1` | 设 `0` 关掉整个「安装命令改写」的注入（勾选框也一起没了） |
 | `KOMARI_LAN_TOGGLE` | `0` | 设 `1` 在「一键部署指令」弹窗里加「安装命令用内网地址」勾选框 |
 | `KOMARI_LAN_HOST` | 自动探测容器 IPv4 | 手动指定内网地址（B 模式跳转 + 勾选框都用它） |
-| `KOMARI_LAN_PORT` | `80`（勾选框）/ 跟随 nginx（B） | 勾选框里的内网端口填 komari 的端口；B 模式填跳转端口 |
+| `KOMARI_LAN_PORT` | `80`（勾选框）/ 跟随 nginx（B） | 勾选框里的内网端口（默认 80/443 不会写进地址）。注意填 nginx 的端口，不是 komari 内部端口 |
 | `KOMARI_LAN_DEBUG` | `0` | 设 `1` 时暴露 `window.__WB_LAN__` 便于排查（生产别开） |
 
 ### 实现说明

@@ -46,8 +46,14 @@ EOF
             lan_port="${KOMARI_LAN_PORT:-80}"
             lan_scheme="http"
             [ "$lan_port" = "443" ] && lan_scheme="https"
-            wb_boot="{$dbg_flag\\\"lanOrigin\\\":\\\"$lan_scheme://$lan_host:$lan_port\\\",\\\"toggle\\\":1}"
-            echo "[entrypoint] 勾选框模式：内网地址 $lan_scheme://$lan_host:$lan_port"
+            # 默认端口不写进地址：http 的 80 / https 的 443 都省掉，标签好看也好复制
+            if [ "$lan_port" = "80" ] || [ "$lan_port" = "443" ]; then
+                lan_addr="$lan_host"
+            else
+                lan_addr="$lan_host:$lan_port"
+            fi
+            wb_boot="{$dbg_flag\\\"lanOrigin\\\":\\\"$lan_scheme://$lan_addr\\\",\\\"toggle\\\":1}"
+            echo "[entrypoint] 勾选框模式：内网地址 $lan_scheme://$lan_addr"
         else
             wb_boot="{$dbg_flag\\\"toggle\\\":1}"
             echo "[entrypoint] KOMARI_LAN_TOGGLE=1 但没探测到容器 IPv4，勾选框地址回退为当前访问地址" >&2
