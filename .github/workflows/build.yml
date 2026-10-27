@@ -307,7 +307,9 @@ jobs:
           fi
           echo "$AVER"
           # 没配 ACME 时 acme 进程应正常退出，而不是 FATAL / 反复重启
-          AST=$(docker exec ksmoke supervisorctl status acme 2>&1)
+          # 注意：supervisorctl 对非 RUNNING 状态返回退出码 3，而 run 步骤默认 set -e，
+          # 不加 || true 会在断言前就把脚本带崩（上次 smoke 失败就是它）
+          AST=$(docker exec ksmoke supervisorctl status acme 2>&1 || true)
           echo "$AST"
           if ! echo "$AST" | grep -q 'EXITED'; then
             echo "::error::未配置 ACME 时 acme 进程应为 EXITED，实际: $AST"; exit 1
@@ -353,7 +355,7 @@ jobs:
             echo "::error::/certs 为空时没生成自签占位证书（nginx 会因找不到 pem 起不来）"
             docker logs kacme --tail=30; docker rm -f kacme; exit 1
           fi
-          SUBJ=$(docker exec kacme openssl x509 -in /certs/fullchain.pem -noout -subject 2>&1)
+          SUBJ=$(docker exec kacme openssl x509 -in /certs/fullchain.pem -noout -subject 2>&1 || true)
           echo "占位证书: $SUBJ"
           if ! echo "$SUBJ" | grep -q 'panel.example.com'; then
             echo "::error::占位证书 CN 不是配置的域名"; docker rm -f kacme; exit 1
@@ -362,7 +364,7 @@ jobs:
             echo "::error::占位证书就位后 nginx -t 仍失败（443 段加载不了）"
             docker logs kacme --tail=30; docker rm -f kacme; exit 1
           fi
-          KAST=$(docker exec kacme supervisorctl status acme 2>&1)
+          KAST=$(docker exec kacme supervisorctl status acme 2>&1 || true)
           echo "$KAST"
           if echo "$KAST" | grep -qE 'FATAL|BACKOFF'; then
             echo "::error::配了 ACME 后 acme 进程起不来: $KAST"; docker rm -f kacme; exit 1
