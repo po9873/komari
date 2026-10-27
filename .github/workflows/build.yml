@@ -20,6 +20,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 仓库和镜像都是公开的，真实地址/凭据一旦提交就删不干净（git 历史还在）。
+      # 放在第一步：拦下就立刻失败，不会走到构建、更不会推镜像出去。
+      - name: 公开库泄漏自检（真实地址 / token / 密码）
+        run: sh scripts/guard-public.sh
+
       - name: 查 komari / cloudflared 最新 release
         id: up
         env:
