@@ -37,7 +37,7 @@ server {
     }
 
     # 证书验证文件走这里：acme.sh 把 token 写进 /acme，
-    # CA 来抓 http://你的域名/.well-known/acme-challenge/<token>
+    # CA 会请求 http://<域名>/.well-known/acme-challenge/<token>
     # 不开 ACME 时留着也没影响
     location /.well-known/acme-challenge/ {
         root /acme;
@@ -58,7 +58,7 @@ server {
 EOF
 ```
 
-要上 TLS 就在这个文件后面再追一段 443（证书由镜像里的 acme.sh 自己签发、自己写进 `/certs`，**你不用先准备证书**）：
+要启用 TLS 就在该文件后追加一段 443（证书由镜像内的 acme.sh 自行签发并写入 `/certs`，无需预先准备）：
 
 ```nginx
 server {
@@ -82,7 +82,7 @@ server {
 }
 ```
 
-内网也用 `https://域名` 访问时这段不能省，原因见「内网也用 https 打开，为什么还必须有证书」。
+内网也以 `https://域名` 访问时该段不能省略，原因见「内网也用 `https://域名` 打开，为什么还必须有证书」。
 
 注意挂载目标是 `/etc/nginx/http.d/default.conf`：镜像里的 nginx 是 alpine 的包，只读 `http.d/*.conf`，`conf.d/` 不生效。
 
@@ -105,8 +105,8 @@ services:
       - ./acme-sh:/acme.sh        # acme.sh 的账号与续期记录，不挂则每次重建都重新注册
     environment:
       ADMIN_USERNAME: admin       # 首次启动时创建的管理员
-      ADMIN_PASSWORD: 换成你的密码
-      TUNNEL_TOKEN: 换成你的隧道Token
+      ADMIN_PASSWORD: <管理员密码>
+      TUNNEL_TOKEN: <隧道 Token>
       GODEBUG: disablethp=1
       # 证书那块不用配：域名从 /certs 现有证书或 CF 隧道配置里自动识别
       # 想固定域名 / 收 CA 到期提醒再加这两行
@@ -116,7 +116,7 @@ services:
 
 `TUNNEL_TOKEN` 必填：cloudflared 靠它建隧道，留空会导致 supervisord 拉不起这个进程。
 
-不需要 https、证书那块想自己管的，把 `443:443` 和 `certs` / `acme` / `acme-sh` 三行挂载删掉，再加 `KOMARI_ACME_ENABLED: "0"` 即可，其余不变。
+不使用 https、证书自行管理时，删除 `443:443` 与 `certs` / `acme` / `acme-sh` 三行挂载，并设置 `KOMARI_ACME_ENABLED: "0"`，其余不变。
 
 ### 3. 启动
 
@@ -134,11 +134,11 @@ docker exec komari supervisorctl status          # acme 在没配 ACME 时显示
 curl -I http://127.0.0.1/
 ```
 
-三个常驻进程都在、`curl` 返回 `200` 或 `302` 就算起来了。
+三个常驻进程均在、`curl` 返回 `200` 或 `302` 即启动完成。
 
 ## 挂载说明（哪个能删、哪个不能）
 
-镜像本身只依赖一个目录：`/app/data`。其余挂载都是**你自己那份 `nginx.conf` 里写了路径**、或者开了内置 ACME 才需要的。
+镜像本身只依赖一个目录：`/app/data`。其余挂载由 **`nginx.conf` 中引用的路径**、或启用内置 ACME 决定。
 
 | 容器内路径 | 要不要挂 | 判断依据 |
 |---|---|---|
@@ -151,34 +151,32 @@ curl -I http://127.0.0.1/
 
 几个最常见的坑：
 
-- **删 `/certs` 会直接让面板打不开**：不是少个功能，是 nginx 起不来。要走这条得同时把 conf 里的 `listen 443 ssl` 和证书配置删掉。
+- **删除 `/certs` 会直接导致面板无法访问**：nginx 无法启动。采用该方式需同时移除 conf 中的 `listen 443 ssl` 与证书配置。
 - **把 `/certs` 或 `/acme` 挂成 `:ro`**：容器能起来，但续期时写不进去，90 天后证书原地过期、内网 https 突然报错。这种失效不会报警。
-- **删 `/acme` 当天没有任何感觉，60 天后才炸**：站点照常跑，但挑战文件写不进来（nginx 那边 404）。
-- **删 `/icons` 是安全的**：`alias` 指向不存在的目录，nginx 照样启动，只是那些路径返回 404。
+- **删除 `/acme` 不会立即报错，约 60 天后证书续期才会失败**：站点照常运行，但挑战文件写不进来（nginx 返回 404）。
+- **删除 `/icons` 是安全的**：`alias` 指向不存在的目录时 nginx 仍可正常启动，仅这些路径返回 404。
 
-第一次启动时 `/certs` 是空的，而 conf 里已经有 `listen 443 ssl`——这时镜像会**先放一张 7 天自签占位证书**让 nginx 能起来，acme.sh 签下正式证书后覆盖它并 reload。所以你不用再「先删 443 段、签完再加回去」。
+## 内网以 `https://域名` 访问为何仍需证书
 
-## 内网也用 `https://域名` 打开，为什么还必须有证书
-
-因为内网直连时，**Cloudflare 根本不在链路上**。浏览器访问 `https://komari.example.com`，DNS 被解析到容器 IP 后，TLS 握手的对端就是容器里的 nginx，不是 Cloudflare 边缘。公网方向那张证书由 Cloudflare 出示，内网方向没人替你出，只能容器自己出 —— 所以：
+内网直连时 **Cloudflare 不在链路上**。浏览器访问 `https://komari.example.com`，DNS 被解析到容器 IP 后，TLS 握手的对端就是容器里的 nginx，不是 Cloudflare 边缘。公网方向的证书由 Cloudflare 出示，内网方向没有中间方，只能由容器自身提供：
 
 - `/certs` 必须挂，conf 里必须写 `listen 443 ssl` 和 `ssl_certificate`
-- 里面必须是**这个域名签发**的证书（Let's Encrypt 之类公共 CA）。自签证书在浏览器里是红锁，节点上装 agent 用 `curl` 拉安装脚本时会直接失败
-- 证书换掉后由镜像自己 `nginx -s reload`，不用你手动执行、也不用重建容器
+- 其中必须是**为该域名签发**的证书（Let's Encrypt 等公共 CA）。自签证书在浏览器中显示为不安全，节点安装 agent 时用 `curl` 拉取安装脚本会直接失败
+- 证书更新后由镜像自行 `nginx -s reload`，无需手动执行，也无需重建容器
 
-反过来说，什么时候不需要证书：内网只用 `http://容器IP:端口` 访问，那 443 和 `/certs` 都可以不要。
+不需要证书的情况：内网只用 `http://容器IP:端口` 访问时，443 与 `/certs` 均可省略。
 
-这也决定了下面三选一里该选哪个：内网访问方式是 `https://域名`，**不要开 B**（它会 302 跳到 `http://IP`，等于丢掉 https 和域名）。A（默认开）只是把安装命令里的面板地址换成你当前访问用的地址，用域名打开时命令仍是域名，不影响 https；用 IP 打开时才变成 IP，那是你主动用 IP 访问的结果。
+据此选择下文三种做法：内网访问方式为 `https://域名` 时**不要启用 B**（它会把请求 302 到 `http://IP`，丢掉 https 与域名）。A 只改写安装命令中的面板地址，以域名访问时命令仍是域名，不影响 https；以 IP 访问时才写成 IP。
 
 ## 证书自动续期（镜像内置 acme.sh）
 
-`/certs` 里的证书 90 天到期。到期没换，公网看着一切正常（那是 Cloudflare 边缘的证书），但**内网用 `https://域名` 会当天开始报错**——那一跳的证书就是容器里这一份。
+`/certs` 里的证书 90 天到期。到期未更换时公网访问看似正常（出示的是 Cloudflare 边缘证书），但**内网以 `https://域名` 访问会当天开始报错**，该链路的证书即容器内这一份。
 
 这个镜像里已经带了 acme.sh，**不需要另起 acme 容器、不需要装 certbot、不需要 `docker.sock`**：
 
 - 首次启动自动签发，之后每 24 小时检查一次，到期前 30 天内自动换
 - 换完直接在本容器 `nginx -s reload`，新证书立刻生效
-- 只用 HTTP-01（`--webroot`）：验证文件落在 `/acme`，由你 conf 里的 `location /.well-known/acme-challenge/` 喂给 CA
+- 只用 HTTP-01（`--webroot`）：验证文件落在 `/acme`，通过 conf 里的 `location /.well-known/acme-challenge/` 提供给 CA
 
 **什么都不用配**：域名会自动识别，顺序是
 
@@ -212,24 +210,25 @@ docker exec komari acme-renew.sh --resolve-only
 # [acme] 识别到域名：mb.example.com（来源：CF 隧道配置）
 ```
 
-### 证书是你自己签的，镜像里一份都不带
+### 证书由部署方自签，镜像不含任何证书
 
 - `/certs` 初始就是**空目录**，镜像不带证书、不带私钥、不带任何人的域名
-- `/acme` 也只是一个**空目录**，专门放验证文件；谁签证书就往里写，跟别人毫无关系
-- 本文里的 `komari.example.com`、`192.0.2.10`、`you@example.com` 全是占位符，换成你自己的
-- **仓库里也没有任何人的域名**：域名只在运行时从两处读（`/certs` 里证书的 CN、cloudflared 日志里的隧道配置），代码里没有任何写死的域名。所以别人的部署不会影响你，你的域名也不会因为用了这个镜像被带出去
-- acme.sh 给 ECC 证书建的目录是 `<域名>_ecc`，RSA 才是不带后缀的 `<域名>`。两种都认（`acme_domain_dir`），否则重启后会把「已经签过」误判成首次签发，白白重签还可能失败。这段拼的是 `$DOMAIN` 变量，**对任何域名都一样，没有针对某个域名的特例**
-- 提交前可以本地跑 `sh scripts/guard-public.sh`：只扫被 git 跟踪的文件，白名单之外的 IP、任何 token/私钥形态、任何非占位符密码都会拦下；CI 的 `check` job 第一步也会跑它（拦下就不构建、不推镜像）
+- `/acme` 同样只是**空目录**，用于存放验证文件，由各部署自行写入
+- 本文中的 `komari.example.com`、`192.0.2.10`、`you@example.com` 均为占位符，按实际值替换
+- **仓库与镜像内均不含任何域名**：域名只在运行时读取，来源是 `/certs` 中证书的 CN 与 cloudflared 日志中的隧道配置，代码里没有写死的域名
+- acme.sh 的 ECC 证书记录在 `<域名>_ecc` 目录，RSA 才是 `<域名>`。`acme_domain_dir` 两者都识别，避免重启后把已签发状态误判为首次签发而重复申请。目录名由 `$DOMAIN` 拼接，对任意域名一致
+- `sh scripts/guard-public.sh`：公开库泄漏自检，扫描被 git 跟踪的文件，白名单之外的 IP、token/私钥形态、非占位符密码一律报错。CI 的 `check` job 第一步执行，未通过则不构建、不推镜像
 
-### 首次签发：不用再「先删 443 段」
+### 首次签发的占位证书
 
-以前 `/certs` 空着而 conf 里写着 `listen 443 ssl`，nginx 会直接起不来，只能先删 443、签完再加回来。现在不用了：
+`/certs` 为空而 conf 里写着 `listen 443 ssl` 时，nginx 会因找不到证书而无法启动。镜像的处理顺序是：
 
-1. 启动时如果 `/certs` 里没有证书、而 conf 里 `listen 443 ssl` 指着它，镜像会**先放一张 7 天自签占位证书**（域名还没识别出来时 CN 暂用 `komari.local`），nginx 照样起得来
-2. acme.sh 签发成功后把正式证书写进 `/certs` 并 reload，占位证书被覆盖
-3. `curl -I https://你的域名` 返回 200，且 `openssl x509` 看到的是 Let's Encrypt，就成了
+1. 启动时若 `/certs` 内无证书、而 conf 中 `listen 443 ssl` 指向它，镜像**先放一张 7 天自签占位证书**（域名尚未识别时 CN 暂用 `komari.local`），nginx 可正常启动
+2. acme.sh 签发成功后把正式证书写入 `/certs` 并 reload，占位证书被覆盖
 
-看进度：
+验证：`curl -I https://<域名>` 返回 200，且 `openssl x509` 显示签发者为 Let's Encrypt。
+
+查看进度：
 
 ```bash
 docker logs komari 2>&1 | grep '\[acme\]'
@@ -239,19 +238,19 @@ docker logs komari 2>&1 | grep '\[acme\]'
 
 ### 签发失败时按这三条查
 
-看到 `[acme] 签发失败，10 分钟后重试`，按顺序确认：
+出现 `[acme] 签发失败，10 分钟后重试` 时，按顺序检查：
 
 1. **域名是否指向这个容器**：`nslookup komari.example.com` 要落到能访问到 nginx 的地址（公网走隧道也算）
 2. **验证路径是否通**：`curl -i http://komari.example.com/.well-known/acme-challenge/probe` 必须返回 **nginx 的 404**（说明请求到了源站、只是文件不存在）。返回 CF 的 301/403 页面就是被 CF 挡了
 3. **`/acme` 挂了没、可写吗**：`:ro` 会写不进去
 
-域名挂在 Cloudflare 上**不影响**这个流程：CF 默认把 `/.well-known/acme-challenge/` 原样透传到源站，不改写也不拦（已实测过）。
+域名托管在 Cloudflare 上**不影响**该流程：CF 默认将 `/.well-known/acme-challenge/` 原样透传到源站，不改写也不拦截。
 
-### 想自己管证书（不用内置 ACME）
+### 自行管理证书（不启用内置 ACME）
 
-把 `KOMARI_ACME_ENABLED` 设成 `0`，镜像就完全不碰 `/certs`。自己签的文件照样放 `/certs/fullchain.pem` + `/certs/privkey.pem`，nginx 照读。
+将 `KOMARI_ACME_ENABLED` 设为 `0` 后，镜像不再读写 `/certs`。自签证书仍放至 `/certs/fullchain.pem` 与 `/certs/privkey.pem`，nginx 照常读取。
 
-续期如果在外面的容器或宿主机上跑，注意三件事：
+续期在外置容器或宿主机上执行时，需注意三点：
 
 1. `/certs`、`/acme` 两边都别挂 `:ro`（外面要写）
 2. 客户端的目标路径要写成容器内的 `/certs/...`、`/acme`，并且和 compose 里的 bind 目标一一对应
@@ -261,21 +260,21 @@ DNS-01（不需要 80 端口、不需要 `/acme`）的写法：
 
 ```bash
 curl https://get.acme.sh | sh -s email=you@example.com
-export CF_Token="你的 Cloudflare API Token"
+export CF_Token="<Cloudflare API Token>"
 
 ~/.acme.sh/acme.sh --issue --dns dns_cf -d komari.example.com \
-  --key-file       /你的路径/certs/privkey.pem \
-  --fullchain-file /你的路径/certs/fullchain.pem \
+  --key-file       /path/to/certs/privkey.pem \
+  --fullchain-file /path/to/certs/fullchain.pem \
   --reloadcmd      "docker exec komari nginx -s reload"
 ```
 
 `acme.sh` 安装时自己写好 cron，之后每 60 天换一次并执行 `--reloadcmd`。
 
-> 旧版本那段「用 `neilpang/acme.sh` 常驻容器 + 挂 `docker.sock`」的做法**已经去掉**：镜像里本来就有 nginx 和 acme.sh，再单开一个容器是多余的，而且挂 `docker.sock` 等于把宿主机 root 交出去。已经在跑的话，`docker rm -f acme-renew` 停掉它，改配上面两个环境变量即可（`./acme`、`./certs`、`./acme-sh` 这三个目录可以直接复用，续期记录都在里面）。
+> 早期版本采用 `neilpang/acme.sh` 常驻容器并挂载 `docker.sock`，该方式已移除：镜像内已有 nginx 与 acme.sh，单独起容器多余，且挂载 `docker.sock` 等同于交出宿主机 root。若该容器仍在运行，`docker rm -f acme-renew` 停用后即可由内置 ACME 接管，`./acme`、`./certs`、`./acme-sh` 三个目录可直接复用，续期记录在其中。
 
-### 验证续期是真的会跑
+### 验证续期是否生效
 
-别等 90 天。内置 acme.sh 可以直接强制续一次，看它有没有真换证书、有没有 reload：
+无需等到 90 天后验证。强制续期一次即可确认签发、落盘、reload 是否都正常：
 
 ```bash
 # 先看当前证书到期时间
@@ -290,9 +289,9 @@ docker exec komari openssl x509 -in /certs/fullchain.pem -noout -dates
 docker exec komari nginx -t
 ```
 
-`notAfter` 推到新日期、日志里有 `nginx 已 reload，新证书生效`，就说明整条链路（签发 → 落盘 → reload）都通。到期前 30 天还没变，就是续期挂了——盯这一条就够。
+`notAfter` 后移、日志出现 `nginx 已 reload，新证书生效`，说明签发 → 落盘 → reload 全链路正常。若到期前 30 天内 `notAfter` 仍未变化，即续期未生效。
 
-### 宿主机上如果还留着老的续期任务，先关掉
+### 宿主机上残留的续期任务
 
 内置 ACME 和外面的 certbot / acme.sh cron 同时跑会互相覆盖 `/certs`。切换前先查一遍宿主机：
 
@@ -301,11 +300,11 @@ crontab -l 2>/dev/null | grep -Ei 'acme|certbot'
 systemctl list-timers --all 2>/dev/null | grep -i certbot
 ```
 
-有就注释掉/停掉即可，内置 ACME 默认就会接手。如果本来就在用外置客户端、不想换，把 `KOMARI_ACME_ENABLED` 设成 `0`，按上一节「想自己管证书」走。
+有则注释或停用，内置 ACME 默认接管。若仍需使用外置客户端，将 `KOMARI_ACME_ENABLED` 设为 `0`，按上一节「自行管理证书」处理。
 
 ## 局域网访问不绕 Cloudflare
 
-面板生成的安装命令，用的是「你在浏览器里访问的那个地址」。所以内网设备如果用域名打开面板，复制出来的命令就是域名 —— 内网机器装 agent 时会先出公网、绕一圈 Cloudflare 再回来，慢且容易失败。
+面板生成的安装命令使用浏览器当前访问的地址。内网设备以域名打开面板时，复制出的命令即为域名，内网机器安装 agent 会绕经 Cloudflare 出公网再返回，延迟高且容易失败。
 
 镜像提供三种解法，**按需选**：
 
@@ -316,30 +315,30 @@ systemctl list-timers --all 2>/dev/null | grep -i certbot
 | B. 自动跳转 | `KOMARI_LAN_AUTO=1` | 内网用域名打开会自动跳到 `http://容器IP` | 只在局域网用面板 |
 | C. 内网 DNS 加一条本地记录 | 不用镜像参与 | 域名始终是域名，内网直接连容器，https 不变 | 内网也用 `https://域名` 打开 |
 
-三种都要求**内网的设备能直接连到容器**（容器接了 macvlan / host 网络之类）。默认的 bridge + `ports` 映射，容器 IP 是 `172.x`，内网其它机器连不上，这几个都别开。
+三种方式都要求**内网设备能直接连到容器**（容器使用 macvlan / host 网络等）。默认 bridge + `ports` 映射下容器 IP 为 `172.x`，内网其它机器无法直连，这几种方式均不适用。
 
 ### A. 安装命令自动改用当前访问地址（默认开，无 UI）
 
 前端**没有任何勾选框、浮层、多出来的按钮**，页面和原版一模一样。功能由一段注入脚本静默完成：
 
-- 你用什么地址打开面板，安装命令就用什么地址
+- 安装命令跟随访问面板所用的地址
 - 用 `https://komari.example.com` 打开 → 命令里是 `https://komari.example.com`（agent 走公网/隧道）
 - 用 `http://192.0.2.10:8080` 打开 → 命令变成 `http://192.0.2.10:8080`（agent 直连内网、不绕 Cloudflare）
 - 改的是命令里的面板地址：下载脚本的 URL 不动，只换 `-e` / `--endpoint` 后面那个地址
-- 地址**不写死**：镜像里没有任何 IP / 域名，取的是浏览器此刻的 `location.origin`。别人拉这个镜像跑，拿到的是他自己的地址
+- 地址**不写死**：镜像内不含任何 IP / 域名，取自浏览器当前的 `location.origin`，不同部署各自得到自己的地址
 - 用公网域名打开时，换前换后相同，等于不改，无害
 
-`KOMARI_LAN_INJECT=0` 可以关掉这段注入（关掉后命令永远是面板默认的域名）。
+`KOMARI_LAN_INJECT=0` 可关闭该注入（关闭后命令始终为面板默认地址）。
 
-#### 怎么确认它在生效
+#### 生效确认
 
-页面上看不到它，只能在 Console 里问：
+页面不显示状态，可在 Console 查看：
 
 ```js
 __WB_LAN__        // 勾选框模式（KOMARI_LAN_DEBUG=1 时才有这个变量）
 ```
 
-- 没有这个变量 ⇒ 页面是旧的（Ctrl+Shift+R 强制刷新），或没开 `KOMARI_LAN_DEBUG`
+- 缺少该变量 ⇒ 页面为缓存版本（强制刷新），或未开启 `KOMARI_LAN_DEBUG`
 - 打开节点页看安装命令的 `-e` 后面是不是当前访问地址
 - 「复制」拿到的文本也被同步改写，不只是显示好看
 
@@ -348,23 +347,23 @@ __WB_LAN__        // 勾选框模式（KOMARI_LAN_DEBUG=1 时才有这个变量�
 **不用配任何变量**：镜像默认就有这一行。只在「一键部署指令」弹窗里出现，别的地方什么都没有。
 
 - 位置：弹窗里「安装选项」那组的**最后一行**，样式和原生那几条选项完全一致（同一套 Radix 组件类名）
-- 文案：只有 `安装命令用内网地址` —— **界面上不显示具体 IP / 端口**。IP 和端口是每台部署各自不同的（容器 IP、nginx 端口都不一样），钉在页面上的那个值对别人就是错的；想知道实际换成了什么地址，看命令框里的 `-e` 就行
-- 默认值：**默认勾上**（域名打开、内网 IP 打开都一样）。很多人在局域网里也是用域名打开面板，按「访问地址是不是内网 IP」判断默认值会让这个选项永远默认不勾
+- 文案：`安装命令用内网地址`，**界面上不显示具体 IP / 端口**。地址随部署而异，写死在页面上对其它部署即为错误值；实际替换结果见命令框中的 `-e`
+- 默认值：**勾选**，与访问方式无关。若按「访问地址是否为内网 IP」决定默认值，局域网内以域名访问时该选项将始终不勾选
 - 想默认用域名：`KOMARI_LAN_DEFAULT=0`，或者手动取消一次（会记在浏览器里）
 - 想彻底关掉这一行：`KOMARI_LAN_TOGGLE=0`
 - 勾上：命令框里的面板地址实时换成内网地址，**点「复制」拿到的是改写后的**
 - 取消：原样还原成面板自己生成的命令
-- 地址来源：**全自动**——容器 IPv4 启动时探测，端口从挂进来的 nginx 配置里读（跳过 `443 ssl`，优先非 80 的明文端口，比如 `listen 25774`）。自动识别的不对（比如 agent 在别的网段、想走主机名），点勾选框旁边的「**改**」自己填一个，支持主机名。界面上不显示任何 IP/端口，填的地址只存在你自己的浏览器里
+- 地址来源：**全自动**——容器 IPv4 启动时探测，端口从挂进来的 nginx 配置里读（跳过 `443 ssl`，优先非 80 的明文端口，比如 `listen 25774`）。自动识别的不对（比如 agent 在别的网段、想走主机名），点勾选框旁的「**改**」可手动指定，支持主机名。界面上不显示任何 IP/端口，填写的地址仅保存在浏览器 `localStorage`
 - 记忆：选择存在浏览器 `localStorage`，刷新还在
 - 弹窗一关控件就随 DOM 消失，仪表盘/设置页等其它页面**不会出现任何多出来的东西**
 
-内网地址是容器启动时探测的；探测不到时不插这一行（不会给一个假地址）。要强制指定，用 `KOMARI_LAN_HOST` / `KOMARI_LAN_PORT` 覆盖，`KOMARI_LAN_HOST` 可以直接填主机名。
+内网地址由容器启动时探测；探测不到时不插入该行，不使用猜测值。需要指定时用 `KOMARI_LAN_HOST` / `KOMARI_LAN_PORT` 覆盖，`KOMARI_LAN_HOST` 可填主机名。
 
 ### B. 自动跳转（`KOMARI_LAN_AUTO`）
 
 不显示任何界面元素，内网用域名打开时直接 302 到容器内网地址：
 
-| 你从哪访问 | 结果 |
+| 访问来源 | 结果 |
 |---|---|
 | 公网、走 Cloudflare | 不跳转，安装命令用域名 |
 | 内网、直接用 `http://容器IP` 打开 | 不跳转，命令本来就是 IP |
@@ -379,7 +378,7 @@ __WB_LAN__        // 勾选框模式（KOMARI_LAN_DEBUG=1 时才有这个变量�
 
 `nginx.conf` 里需要有那段 `if ($wb_redirect_lan)`，见「部署」第 1 步。
 
-### C. 内网 DNS 加一条静态记录（不用开上面两个）
+### C. 内网 DNS 添加静态记录（不使用上述两种方式）
 
 要做的只有一件事：**在内网某台 DNS 上，把面板域名直接解析到容器 IP**，别让它去问公网。
 
@@ -387,9 +386,9 @@ __WB_LAN__        // 勾选框模式（KOMARI_LAN_DEBUG=1 时才有这个变量�
 komari.example.com   →   192.0.2.10
 ```
 
-不要求特定设备、特定固件、特定品牌。唯一的前提是**你内网里有一层 DNS 允许加本地记录** —— 单独跑的内网 DNS 服务、路由/DHCP 自带的解析功能、NAS 上的解析服务、Linux 上跑的解析服务、甚至单台机器的 hosts，加在哪一层效果都一样。哪层方便用哪层，不需要为了这个换设备。
+不限定设备、固件或品牌。前提是**内网中存在一层可添加本地记录的 DNS** —— 独立内网 DNS 服务、路由/DHCP 自带的解析功能、NAS 上的解析服务、Linux 上的解析服务、单机 hosts 均可，加在哪一层效果相同。
 
-两种形态，按你手上有的来：
+两种形态：
 
 **形态一：有界面，表格里填「域名 + 地址」**
 
@@ -407,7 +406,7 @@ address=/komari.example.com/192.0.2.10
 
 **形态三：先在一台机器上验证（hosts）**
 
-不想动任何服务时用这个，改完只是这一台生效：
+仅需单机验证、不改动任何服务时使用，改动只对该机器生效：
 
 ```
 # Linux / macOS: /etc/hosts      Windows: C:\Windows\System32\drivers\etc\hosts
@@ -416,20 +415,20 @@ address=/komari.example.com/192.0.2.10
 
 加完的效果：
 
-- 内网设备解析 → `192.0.2.10`，直连容器，443 证书照样有效，不碰 Cloudflare
+- 内网设备解析 → `192.0.2.10`，直连容器，443 证书仍然有效，不经过 Cloudflare
 - 公网设备解析 → Cloudflare 的地址，走隧道
 - 面板里复制出来的命令一直是 `https://komari.example.com/install.sh ...`，两边都能装，不用切换
 
-**怎么确认改对了**（改的是哪一层，就问哪一层）：
+**验证方式**（查询哪一层即确认哪一层）：
 
 ```bash
-nslookup komari.example.com 你的内网DNS地址    # 应该返回 192.0.2.10
+nslookup komari.example.com <内网DNS地址>      # 应返回 192.0.2.10
 nslookup komari.example.com 223.5.5.5          # 应该返回 Cloudflare 的地址
 ```
 
-两条结果不一样，才说明本地解析生效了。若是同一个结果，说明客户端没走那台 DNS，或者记录没生效。
+两条结果不同才说明本地解析生效；结果相同则说明客户端未使用该 DNS，或记录未生效。
 
-这种方式镜像不参与，`KOMARI_LAN_INJECT=0` 和 `KOMARI_LAN_AUTO` 都留空/关掉即可。
+该方式镜像不参与，`KOMARI_LAN_INJECT` 与 `KOMARI_LAN_AUTO` 保持默认或关闭即可。
 
 ### 可选覆盖项
 
@@ -449,7 +448,7 @@ nslookup komari.example.com 223.5.5.5          # 应该返回 Cloudflare 的地�
 - 静默模式（默认）**不创建任何 DOM 元素**——没有 shadow root、没有浮动层，只改 textarea 的值和剪贴板内容
 - 勾选框模式只创建**一行**：`安装选项` 那组末尾的一个勾选行，弹窗移除时随之消失
 - 光写 `textarea.value` 不够：面板是 React 受控组件，下一次重渲染会用自己 state 里的原命令把 DOM 盖回去。脚本因此在 textarea 上劫持了 `value` 的 setter——面板每次回写都被拦下改写，原始命令另存一份用于「取消勾选还原」
-- 「安装选项」这一行的插入位置不写死单一路径，按上游 DOM 做**多级退路**（上游改版本时不会一说没就没）：
+- 「安装选项」这一行的插入位置不写死单一路径，按上游 DOM 做**多级退路**（上游改版时不致直接失效）：
   1. 认标题文案（`安装选项` / `安装参数` / `Install options`），插到它后面的格子 —— 正常情况走这条
   2. 标题外面多包了一层 → 往上层继续找兄弟
   3. 标题整个没了 → 按弹窗里的勾选控件反推它们共同的父容器
@@ -458,9 +457,9 @@ nslookup komari.example.com 223.5.5.5          # 应该返回 Cloudflare 的地�
 - React 重建了选项格子时，脚本会把失效的旧行清掉重插，**不会出现两行**
 - 地址取浏览器 `location.origin`（静默）或启动探测的容器 IP（勾选框），不是镜像写死的；换台机器、换种访问方式，改写的都是各自正确的地址
 
-#### 怎么确认这一行插上了（上游改版后排查用）
+#### 插入状态确认（上游改版排查）
 
-页面上不显示任何状态，但控制台里随时能问：
+页面不显示状态，可在控制台查询：
 
 ```js
 __WB_LAN_STATE__
@@ -473,11 +472,11 @@ __WB_LAN_STATE__
 
 - B 模式（302 跳转）只有显式设 `KOMARI_LAN_AUTO=1` 才会写进 nginx 配置
 
-如果之前往面板「设置 → 自定义美化 → 自定义 Body」里粘过切换地址的脚本，请把那段清空——现在由镜像统一处理，两段一起跑会互相覆盖。
+若面板「设置 → 自定义美化 → 自定义 Body」中已有切换地址的脚本，需清空：镜像已统一处理，两段同时运行会互相覆盖。
 
 ### 前端脚本的测试
 
-`tests/lan-toggle.test.js` 用 jsdom 1:1 复刻面板弹窗的 DOM 结构，覆盖：勾选框位置/默认值、`-e` 改写、GitHub 下载地址不被误改、取消还原、React 重渲染后自动重写、公网域名访问默认不勾、无弹窗页面零新增元素、静默模式、剪贴板改写。
+`tests/lan-toggle.test.js` 用 jsdom 1:1 复刻面板弹窗的 DOM 结构，覆盖：勾选框位置与默认勾选状态、`-e` 改写、GitHub 下载地址不被误改、取消后还原、React 重渲染后自动重写、无弹窗页面零新增元素、静默模式、剪贴板内容同步。
 
 ```bash
 npm i --no-save jsdom

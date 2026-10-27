@@ -189,7 +189,7 @@ install_cert() {
 log "已启用：域名=$DOMAIN server=$SERVER webroot=$WEBROOT 证书目录=$CERT_DIR 检查间隔=${INTERVAL}s"
 
 while true; do
-    # acme.sh 自己的记录才代表「签过」——/certs 里可能是你之前手工放进去的
+    # 以 acme.sh 自身的记录判断是否签发过——/certs 中可能是手工放入的证书
     if ! dir=$(acme_domain_dir); then
         if issue; then
             install_cert "$(acme_domain_dir || true)"
