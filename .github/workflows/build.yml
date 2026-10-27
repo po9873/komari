@@ -273,8 +273,10 @@ jobs:
                        -H 'Host: panel.example.com' "http://$TIP/"); then
             diag "toggle 模式首页取不到（容器 IP=$TIP）"; docker rm -f ktoggle; exit 1
           fi
-          if ! echo "$PAGE" | grep -q '__WB_LAN__'; then
-            diag "首页没有注入开关脚本，页面开头=$(echo "$PAGE" | tr '\n' ' ' | cut -c1-200)"
+          # 注入标记：entrypoint 在 </body> 前塞了 <script>var b="..."</script>，
+          # 里面是 base64 后的 lan-toggle.js；不再依赖已移除的 window.__WB_LAN__ 引导变量
+          if ! echo "$PAGE" | grep -q 'var b="'; then
+            diag "首页没有注入开关脚本（找不到 var b= 注入标记），页面开头=$(echo "$PAGE" | tr '\n' ' ' | cut -c1-200)"
             docker rm -f ktoggle; exit 1
           fi
           if ! echo "$PAGE" | grep -q 'var b="'; then
