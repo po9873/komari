@@ -342,6 +342,33 @@ jobs:
           fi
           docker rm -f ktog2 >/dev/null 2>&1 || true
 
+          echo "=== KOMARI_LAN_DEFAULT=0：boot 里带 checked:0（默认用域名）"
+          docker rm -f ktog3 >/dev/null 2>&1 || true
+          if ! K3OUT=$(docker run -d --name ktog3 \
+            -e TUNNEL_TOKEN=0000000000000000000000000000000000000000000000000000000000000000 \
+            -e ADMIN_USERNAME=admin \
+            -e ADMIN_PASSWORD=test-only-not-a-secret \
+            -e KOMARI_LAN_TOGGLE=1 \
+            -e KOMARI_LAN_HOST=10.9.9.9 \
+            -e KOMARI_LAN_PORT=25774 \
+            -e KOMARI_LAN_DEFAULT=0 \
+            -v /tmp/default.conf:/etc/nginx/http.d/default.conf:ro \
+            "$IMAGE" 2>&1); then
+            echo "::error::默认不勾模式容器启动失败: $(echo "$K3OUT" | tr '\n' ' ')"
+            exit 1
+          fi
+          sleep 15
+          B3=$(docker exec ktog3 grep -F '$wb_boot' /etc/nginx/http.d/00-lan.conf 2>&1 || true)
+          echo "boot: $B3"
+          if ! echo "$B3" | grep -qF 'checked'; then
+            echo "::error::KOMARI_LAN_DEFAULT=0 没写进 boot"; docker rm -f ktog3; exit 1
+          fi
+          # nginx 的引号转义错一个字符，整段页面脚本就废了，这里顺带跑 nginx -t
+          if ! docker exec ktog3 nginx -t 2>&1; then
+            echo "::error::默认不勾模式 nginx -t 失败"; docker rm -f ktog3; exit 1
+          fi
+          docker rm -f ktog3 >/dev/null 2>&1 || true
+
           echo "=== 前端行为（jsdom 跑 tests/lan-toggle.test.js，用镜像里那份 JS）"
           npm i --no-save --silent jsdom >/dev/null 2>&1
           node tests/lan-toggle.test.js /tmp/lan-toggle.js

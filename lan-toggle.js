@@ -7,7 +7,8 @@
  *    「一键部署指令」弹窗的「安装选项」末尾出现一条勾选项：
  *        ☑ 安装命令用内网地址（http://<容器内网IP>:<端口>）
  *    - 只在弹窗里存在，弹窗关了就随之消失，其它页面绝不渲染
- *    - 用内网 IP / localhost 打开面板时默认勾上，公网域名打开默认不勾、可手动勾
+ *    - 默认勾上（不管是域名还是内网 IP 打开面板）；取消勾选后按浏览器记住选择
+ *      KOMARI_LAN_DEFAULT=0 可改成默认不勾（适合只想用域名装 agent 的部署）
  *    - 勾上后：命令框里的面板地址实时换成内网地址（agent 直连、不绕 Cloudflare），
  *      点「复制」拿到的内容同样已改写；取消勾选原样还原
  *    - 内网地址是 entrypoint 启动时探测的容器 IP，每家部署各自不同，镜像里零写死
@@ -178,17 +179,19 @@
 
   /* ---------- 勾选框模式 ---------- */
 
+  // 默认值：默认勾上（用内网地址装 agent）。
+  // 不能用「访问地址是不是内网 IP」来判断——很多人在局域网里也用域名打开面板，
+  // 那时 hostname 是域名，按 IP 判断会永远默认不勾，等于这个选项白给。
+  // 想默认用域名的人：KOMARI_LAN_DEFAULT=0，或自己取消勾选（记在 localStorage 里）。
   function defaultChecked() {
     try {
       var v = localStorage.getItem(STORE_KEY);
       if (v === "1") return true;
       if (v === "0") return false;
     } catch (e) {}
-    var h = location.hostname;
-    return (
-      /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(h) ||
-      /\.(local|lan|internal)$/i.test(h)
-    );
+    if (!lanOrigin) return false; // 探测不到内网地址，勾了也没有可换的地址
+    if (boot.checked === 0) return false;
+    return true;
   }
 
   function applyCheck(btn) {
@@ -197,6 +200,7 @@
   }
 
   function ensureRow(dlg) {
+    if (!lanOrigin) return false; // 没有可换的内网地址：不插这个没用的选项
     if (state.row && dlg.contains(state.row)) return true;
     state.row = null;
     var labels = dlg.querySelectorAll("label");
@@ -223,7 +227,9 @@
     var lab = document.createElement("label");
     lab.className = "text-sm font-normal";
     lab.style.cursor = "pointer";
-    lab.textContent = "安装命令用内网地址（" + targetOrigin() + "）";
+    // 不写具体 IP/端口：那是每台部署各自不同的（容器 IP、nginx 端口都不一样），
+    // 钉在界面上既是错的也会误导。真正的地址看命令框里的 -e 就知道。
+    lab.textContent = "安装命令用内网地址";
 
     row.appendChild(btn);
     row.appendChild(lab);

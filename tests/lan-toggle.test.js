@@ -38,8 +38,8 @@ function dialogHtml(cmd) {
   </body></html>`;
 }
 
-function run(html, bootstrap, prep) {
-  const dom = new JSDOM(html, { url: 'http://10.9.9.9:25774/', runScripts: 'outside-only', pretendToBeVisual: true });
+function runAt(url, html, bootstrap, prep) {
+  const dom = new JSDOM(html, { url, runScripts: 'outside-only', pretendToBeVisual: true });
   const w = dom.window;
   // jsdom 无布局：stub 可见性相关 API
   w.Element.prototype.getBoundingClientRect = function () { return { width: 300, height: 20, top: 0, left: 0, right: 300, bottom: 20 }; };
@@ -50,6 +50,11 @@ function run(html, bootstrap, prep) {
   // 触发 boot（readyState 已是 complete 时 boot 同步执行；保险起见派发事件）
   w.document.dispatchEvent(new w.Event('DOMContentLoaded'));
   return w;
+}
+
+// 默认用「内网 IP 打开」的地址（= lanOrigin 本身）
+function run(html, bootstrap, prep) {
+  return runAt('http://10.9.9.9:25774/', html, bootstrap, prep);
 }
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
@@ -92,23 +97,38 @@ function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
     check('React 重渲染后 800ms 内自动再改写', ta.value.includes('-e ' + LAN));
   }
 
-  // ===== 场景 2：勾选框模式，公网域名访问（默认不勾）=====
+  // ===== 场景 2：勾选框模式，域名访问（同样默认勾上）=====
+  // 局域网里也用域名打开面板是最常见的用法：按「hostname 是不是内网 IP」判断默认值，
+  // 会让这个选项永远默认不勾，等于白给。所以默认值只看有没有内网地址可换。
   {
-    console.log('场景 2：勾选框模式（域名访问，默认不勾，可手动勾）');
-    const dom = new JSDOM(dialogHtml(CMD), { url: 'https://panel.example.com/', runScripts: 'outside-only', pretendToBeVisual: true });
-    const w = dom.window;
-    w.Element.prototype.getBoundingClientRect = function () { return { width: 300, height: 20, top: 0, left: 0, right: 300, bottom: 20 }; };
-    w.getComputedStyle = function () { return { display: 'block', visibility: 'visible' }; };
-    w.eval('window.__WB_LAN__ = ' + JSON.stringify({ lanOrigin: LAN, toggle: 1 }) + ';');
-    w.eval(src);
+    console.log('场景 2：勾选框模式（域名访问，默认勾上）');
+    const w = runAt('https://panel.example.com/', dialogHtml(CMD), { lanOrigin: LAN, toggle: 1 });
     await sleep(100);
     const d = w.document.querySelector('.rt-BaseDialogContent');
-    const ours = d.querySelector('.grid').lastElementChild;
-    check('默认不勾', ours.querySelector('button').getAttribute('data-state') === 'unchecked');
-    check('命令保持公网域名', d.querySelector('textarea').value.includes('panel.example.com'));
-    ours.querySelector('button').click();
+    const btn = d.querySelector('.grid').lastElementChild.querySelector('button');
+    check('域名访问也默认勾上', btn.getAttribute('data-state') === 'checked');
+    check('域名访问时命令已换成内网地址', d.querySelector('textarea').value.includes('-e ' + LAN));
+
+    btn.click();
     await sleep(50);
-    check('手动勾上 → 换内网地址', d.querySelector('textarea').value.includes('-e ' + LAN));
+    check('取消后还原成域名', d.querySelector('textarea').value.includes('-e https://panel.example.com'));
+    check('取消的选择写进 localStorage', w.localStorage.getItem('wb_lan_toggle') === '0');
+
+    const w2 = runAt('https://panel.example.com/', dialogHtml(CMD), { lanOrigin: LAN, toggle: 1 },
+      (win) => win.localStorage.setItem('wb_lan_toggle', '0'));
+    await sleep(100);
+    const btn2 = w2.document.querySelector('.grid').lastElementChild.querySelector('button');
+    check('记住「不勾」后下次打开不勾', btn2.getAttribute('data-state') === 'unchecked');
+
+    const w3 = runAt('https://panel.example.com/', dialogHtml(CMD), { lanOrigin: LAN, toggle: 1, checked: 0 });
+    await sleep(100);
+    const btn3 = w3.document.querySelector('.grid').lastElementChild.querySelector('button');
+    check('KOMARI_LAN_DEFAULT=0 → 默认不勾', btn3.getAttribute('data-state') === 'unchecked');
+    check('该模式下命令保持域名', w3.document.querySelector('textarea').value.includes('panel.example.com'));
+
+    const w4 = runAt('https://panel.example.com/', dialogHtml(CMD), { toggle: 1 });
+    await sleep(100);
+    check('探测不到内网地址时不插这一行', !w4.document.querySelector('[data-wb-lan]'));
   }
 
   // ===== 场景 3：无弹窗（仪表盘）→ 不创建任何东西 =====

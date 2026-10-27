@@ -42,6 +42,9 @@ EOF
         detect_host
         dbg_flag=""
         [ "${KOMARI_LAN_DEBUG:-0}" = "1" ] && dbg_flag='\"debug\":1,'
+        # 默认勾上（内网/域名打开都一样）；KOMARI_LAN_DEFAULT=0 改成默认用域名
+        chk_flag=""
+        [ "${KOMARI_LAN_DEFAULT:-1}" = "0" ] && chk_flag='\"checked\":0,'
         if [ -n "$lan_host" ]; then
             lan_port="${KOMARI_LAN_PORT:-80}"
             lan_scheme="http"
@@ -52,10 +55,10 @@ EOF
             else
                 lan_addr="$lan_host:$lan_port"
             fi
-            wb_boot="{$dbg_flag\\\"lanOrigin\\\":\\\"$lan_scheme://$lan_addr\\\",\\\"toggle\\\":1}"
+            wb_boot="{$dbg_flag$chk_flag\\\"lanOrigin\\\":\\\"$lan_scheme://$lan_addr\\\",\\\"toggle\\\":1}"
             echo "[entrypoint] 勾选框模式：内网地址 $lan_scheme://$lan_addr"
         else
-            wb_boot="{$dbg_flag\\\"toggle\\\":1}"
+            wb_boot="{$dbg_flag$chk_flag\\\"toggle\\\":1}"
             echo "[entrypoint] KOMARI_LAN_TOGGLE=1 但没探测到容器 IPv4，勾选框地址回退为当前访问地址" >&2
         fi
     else
