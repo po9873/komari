@@ -34,6 +34,11 @@
   var toggleMode = !!boot.toggle;
   var DEBUG = !!boot.debug;
   var STORE_KEY = "wb_lan_toggle";
+  var ADDR_KEY = "wb_lan_addr"; // 用户手动改过的内网地址（本浏览器记住）
+  var override = "";
+  try {
+    override = localStorage.getItem(ADDR_KEY) || "";
+  } catch (e) {}
   var TA_DESC = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value");
 
   /* ---------- 命令识别与地址改写 ---------- */
@@ -76,8 +81,9 @@
     return text.replace(new RegExp(esc, "g"), target);
   }
 
+  // 优先级：用户在弹窗里自己填的 > 容器启动时探测/环境变量给的 > 当前访问地址
   function targetOrigin() {
-    return lanOrigin || location.origin;
+    return override || lanOrigin || location.origin;
   }
 
   /* ---------- 可见性：弹窗是 position:fixed，offsetParent 恒为 null ---------- */
@@ -231,9 +237,86 @@
     // 钉在界面上既是错的也会误导。真正的地址看命令框里的 -e 就知道。
     lab.textContent = "安装命令用内网地址";
 
+    // 「改」：自动识别的地址不对时，自己填一个（不点开不显示任何地址）
+    var edit = document.createElement("button");
+    edit.type = "button";
+    edit.textContent = "改";
+    edit.title = "改内网地址";
+    edit.setAttribute("data-wb-lan-edit", "1");
+    edit.style.cssText =
+      "margin-left:4px;padding:0 2px;font-size:12px;line-height:1;opacity:.55;cursor:pointer;background:none;border:0;color:inherit;text-decoration:underline;text-underline-offset:2px";
+
     row.appendChild(btn);
     row.appendChild(lab);
+    row.appendChild(edit);
     grid.appendChild(row);
+
+    function setOverride(v) {
+      override = (v || "").replace(/\/+$/, "");
+      try {
+        if (override) localStorage.setItem(ADDR_KEY, override);
+        else localStorage.removeItem(ADDR_KEY);
+      } catch (e) {}
+      applyAll(dlg);
+      slog("override", override);
+    }
+
+    function openEditor() {
+      if (row.querySelector("input")) return;
+      var inp = document.createElement("input");
+      inp.type = "text";
+      inp.value = override || ""; // 空着 = 用自动识别的地址
+      inp.placeholder = "留空=自动识别";
+      inp.setAttribute("data-wb-lan-input", "1");
+      inp.style.cssText =
+        "width:170px;font-size:12px;padding:2px 6px;margin-left:4px;border:1px solid rgba(128,128,128,.45);border-radius:4px;background:transparent;color:inherit";
+      var ok = document.createElement("button");
+      ok.type = "button";
+      ok.textContent = "确定";
+      ok.setAttribute("data-wb-lan-ok", "1");
+      ok.style.cssText = "font-size:12px;padding:2px 6px;margin-left:4px;cursor:pointer";
+      var no = document.createElement("button");
+      no.type = "button";
+      no.textContent = "取消";
+      no.setAttribute("data-wb-lan-cancel", "1");
+      no.style.cssText = "font-size:12px;padding:2px 6px;margin-left:2px;cursor:pointer;opacity:.7";
+      lab.style.display = "none";
+      edit.style.display = "none";
+      row.appendChild(inp);
+      row.appendChild(ok);
+      row.appendChild(no);
+      try {
+        inp.focus();
+      } catch (e) {}
+
+      function close() {
+        inp.remove();
+        ok.remove();
+        no.remove();
+        lab.style.display = "";
+        edit.style.display = "";
+      }
+      function commit() {
+        var v = (inp.value || "").trim().replace(/\/+$/, "");
+        if (v && !/^https?:\/\/[^\s/]+$/i.test(v)) {
+          inp.style.borderColor = "#e5484d";
+          return;
+        }
+        setOverride(v);
+        close();
+      }
+      ok.addEventListener("click", commit);
+      no.addEventListener("click", close);
+      inp.addEventListener("keydown", function (e) {
+        if (e.key === "Enter") commit();
+        else if (e.key === "Escape") close();
+      });
+    }
+
+    edit.addEventListener("click", function (e) {
+      e.preventDefault();
+      openEditor();
+    });
 
     function flip() {
       state.checked = !state.checked;

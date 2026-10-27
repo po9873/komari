@@ -176,6 +176,53 @@ function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
     check('取消勾选后复制 → 保持原样', calls[1].includes('-e https://panel.example.com'));
   }
 
+  // ===== 场景 6：自动识别的地址不对 → 自己填（不点开不显示任何地址）=====
+  {
+    console.log('场景 6：手动改内网地址');
+    const w = runAt('https://panel.example.com/', dialogHtml(CMD), { lanOrigin: LAN, toggle: 1 });
+    await sleep(100);
+    const d = w.document.querySelector('.rt-BaseDialogContent');
+    const row = d.querySelector('[data-wb-lan]');
+    const ta = d.querySelector('textarea');
+    check('默认用自动识别的地址', ta.value.includes('-e ' + LAN));
+    check('默认界面里没有输入框（不显示地址）', !row.querySelector('input'));
+
+    row.querySelector('[data-wb-lan-edit]').click();
+    await sleep(50);
+    const inp = row.querySelector('[data-wb-lan-input]');
+    check('点「改」才出现输入框', !!inp);
+
+    // 非法地址：不生效
+    inp.value = 'nas.lan';
+    row.querySelector('[data-wb-lan-ok]').click();
+    await sleep(50);
+    check('非法地址被拒绝、命令不变', ta.value.includes('-e ' + LAN));
+
+    // 合法地址：生效并记住
+    inp.value = 'http://nas.lan:8080/';
+    row.querySelector('[data-wb-lan-ok]').click();
+    await sleep(80);
+    check('改成自定义地址后命令跟着改', ta.value.includes('-e http://nas.lan:8080'));
+    check('自定义地址存进 localStorage', w.localStorage.getItem('wb_lan_addr') === 'http://nas.lan:8080');
+    check('输入框收起', !row.querySelector('input'));
+
+    // 重新打开（同一浏览器）→ 用记住的地址
+    const w2 = runAt('https://panel.example.com/', dialogHtml(CMD), { lanOrigin: LAN, toggle: 1 },
+      (win) => win.localStorage.setItem('wb_lan_addr', 'http://nas.lan:8080'));
+    await sleep(100);
+    check('下次打开仍用自定义地址', w2.document.querySelector('textarea').value.includes('-e http://nas.lan:8080'));
+
+    // 清空 → 回到自动识别
+    const row2 = w2.document.querySelector('[data-wb-lan]');
+    row2.querySelector('[data-wb-lan-edit]').click();
+    await sleep(50);
+    row2.querySelector('[data-wb-lan-input]').value = '';
+    row2.querySelector('[data-wb-lan-ok]').click();
+    await sleep(80);
+    check('留空 → 回到自动识别的地址', w2.document.querySelector('textarea').value.includes('-e ' + LAN));
+    check('留空后本地记录被清掉', !w2.localStorage.getItem('wb_lan_addr'));
+  }
+
   console.log(fail === 0 ? '\n全部通过 ✓' : `\n${fail} 项失败 ✗`);
   process.exit(fail === 0 ? 0 : 1);
 })();
