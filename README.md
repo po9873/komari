@@ -17,7 +17,7 @@ po9873/komari:latest
 | komari | `127.0.0.1:25775` | 面板本体，只在容器内部，不对外 |
 | nginx | `80` / `443` | 反代到 `127.0.0.1:25775` |
 | cloudflared | — | 用 `TUNNEL_TOKEN` 建隧道。回源地址在 Cloudflare 面板里配，要指向 **nginx**（80 / 25774 / 443 都行），不要指向 komari 的 25775 |
-| acme.sh | — | 配了 `KOMARI_ACME_ENABLED=1` 才工作：签证书、到期前自动续、renew 后自己 reload nginx。没配就直接退出，不占资源 |
+| acme.sh | — | 默认自动工作：识别到域名（现有证书 CN / CF 隧道配置）且 nginx 引用了 `/certs`，就签发、到期前自动续、renew 后自己 reload nginx。`KOMARI_ACME_ENABLED=0` 可关掉 |
 
 ## 部署
 
@@ -108,15 +108,15 @@ services:
       ADMIN_PASSWORD: 换成你的密码
       TUNNEL_TOKEN: 换成你的隧道Token
       GODEBUG: disablethp=1
-      # ── 证书：这两行配齐就自动签 + 自动续 + 自动 reload ──
-      KOMARI_ACME_ENABLED: "1"
-      KOMARI_ACME_DOMAIN: komari.example.com
-      KOMARI_ACME_EMAIL: you@example.com    # 建议填，CA 的到期提醒会发到这里
+      # 证书那块不用配：域名从 /certs 现有证书或 CF 隧道配置里自动识别
+      # 想固定域名 / 收 CA 到期提醒再加这两行
+      # KOMARI_ACME_DOMAIN: komari.example.com
+      # KOMARI_ACME_EMAIL: you@example.com
 ```
 
 `TUNNEL_TOKEN` 必填：cloudflared 靠它建隧道，留空会导致 supervisord 拉不起这个进程。
 
-不需要 https、证书那块想自己管的，把 `443:443` 和 `certs` / `acme` / `acme-sh` 三行挂载、以及三个 `KOMARI_ACME_*` 一起删掉即可，其余不变。
+不需要 https、证书那块想自己管的，把 `443:443` 和 `certs` / `acme` / `acme-sh` 三行挂载删掉，再加 `KOMARI_ACME_ENABLED: "0"` 即可，其余不变。
 
 ### 3. 启动
 
@@ -180,25 +180,37 @@ curl -I http://127.0.0.1/
 - 换完直接在本容器 `nginx -s reload`，新证书立刻生效
 - 只用 HTTP-01（`--webroot`）：验证文件落在 `/acme`，由你 conf 里的 `location /.well-known/acme-challenge/` 喂给 CA
 
-配两个环境变量就开了：
+**什么都不用配**：域名会自动识别，顺序是
+
+1. `/certs` 里已有证书的 CN —— 续期、重启都认得出，最稳
+2. cloudflared 日志里的远端隧道配置 —— 用 CF 托管隧道时，后台配的 hostname 会打在日志里，全新部署靠这条
+3. 都没有才需要手动填 `KOMARI_ACME_DOMAIN`
 
 ```yaml
     environment:
-      KOMARI_ACME_ENABLED: "1"
-      KOMARI_ACME_DOMAIN: komari.example.com
-      KOMARI_ACME_EMAIL: you@example.com     # 建议填，CA 的到期提醒发这里
+      # 通常一条都不用写；想固定域名 / 收 CA 到期提醒时才加
+      KOMARI_ACME_DOMAIN: komari.example.com   # 可选，留空就自动识别
+      KOMARI_ACME_EMAIL: you@example.com       # 可选，建议填
 ```
 
 | 变量 | 默认 | 作用 |
 |---|---|---|
-| `KOMARI_ACME_ENABLED` | `0` | 设 `1` 才签发/续期；不设就完全不碰 `/certs` |
-| `KOMARI_ACME_DOMAIN` | 空 | 要签的域名（单个），必填 |
+| `KOMARI_ACME_ENABLED` | `auto` | `auto`＝nginx 引用了 `/certs` 就签；`0` 完全不碰 `/certs`；`1` 强制签 |
+| `KOMARI_ACME_DOMAIN` | 空（自动识别） | 只在自动识别不对时才需要填 |
 | `KOMARI_ACME_EMAIL` | 空 | 账号邮箱，建议填 |
 | `KOMARI_ACME_WEBROOT` | `/acme` | 验证文件目录，要和 conf 里的 `root` 一致 |
 | `KOMARI_ACME_CERTS` | `/certs` | 证书落盘目录，要和 conf 里的 `ssl_certificate` 一致 |
 | `KOMARI_ACME_SERVER` | `letsencrypt` | 也可 `zerossl` / `buypass` / `google` |
 | `KOMARI_ACME_STAGING` | `0` | 设 `1` 用测试环境（浏览器不认，只验流程用） |
 | `KOMARI_ACME_INTERVAL` | `86400` | 检查间隔（秒） |
+| `KOMARI_CFD_LOG` | `/var/log/cloudflared.log` | 从哪读 CF 隧道配置，排障时可改 |
+
+识别结果随时可查：
+
+```bash
+docker exec komari acme-renew.sh --resolve-only
+# [acme] 识别到域名：mb.example.com（来源：CF 隧道配置）
+```
 
 ### 证书是你自己签的，镜像里一份都不带
 
@@ -211,7 +223,7 @@ curl -I http://127.0.0.1/
 
 以前 `/certs` 空着而 conf 里写着 `listen 443 ssl`，nginx 会直接起不来，只能先删 443、签完再加回来。现在不用了：
 
-1. 启动时如果 `KOMARI_ACME_ENABLED=1` 且 `/certs` 里没有证书，镜像会**先放一张 7 天自签占位证书**，nginx 照样起得来
+1. 启动时如果 `/certs` 里没有证书、而 conf 里 `listen 443 ssl` 指着它，镜像会**先放一张 7 天自签占位证书**（域名还没识别出来时 CN 暂用 `komari.local`），nginx 照样起得来
 2. acme.sh 签发成功后把正式证书写进 `/certs` 并 reload，占位证书被覆盖
 3. `curl -I https://你的域名` 返回 200，且 `openssl x509` 看到的是 Let's Encrypt，就成了
 
@@ -235,7 +247,7 @@ docker logs komari 2>&1 | grep '\[acme\]'
 
 ### 想自己管证书（不用内置 ACME）
 
-把 `KOMARI_ACME_ENABLED` 留空或设 `0`，镜像就完全不碰 `/certs`。自己签的文件照样放 `/certs/fullchain.pem` + `/certs/privkey.pem`，nginx 照读。
+把 `KOMARI_ACME_ENABLED` 设成 `0`，镜像就完全不碰 `/certs`。自己签的文件照样放 `/certs/fullchain.pem` + `/certs/privkey.pem`，nginx 照读。
 
 续期如果在外面的容器或宿主机上跑，注意三件事：
 
@@ -287,7 +299,7 @@ crontab -l 2>/dev/null | grep -Ei 'acme|certbot'
 systemctl list-timers --all 2>/dev/null | grep -i certbot
 ```
 
-有就注释掉/停掉，再配 `KOMARI_ACME_ENABLED=1`。如果本来就在用外置客户端、不想换，那就把 `KOMARI_ACME_ENABLED` 留空，按上一节「想自己管证书」走。
+有就注释掉/停掉即可，内置 ACME 默认就会接手。如果本来就在用外置客户端、不想换，把 `KOMARI_ACME_ENABLED` 设成 `0`，按上一节「想自己管证书」走。
 
 ## 局域网访问不绕 Cloudflare
 
@@ -298,7 +310,7 @@ systemctl list-timers --all 2>/dev/null | grep -i certbot
 | 做法 | 开关 | 效果 | 适合 |
 |---|---|---|---|
 | A. 安装命令自动改用当前访问地址 | 默认开，无需配置 | 用内网地址打开面板→命令用内网地址；用公网域名打开→命令用公网域名。**页面上没有任何控件** | 内网、公网机器都要装 |
-| A+. 部署弹窗里给一个内网勾选框 | `KOMARI_LAN_TOGGLE=1`（建议同时给 `KOMARI_LAN_PORT`） | 「一键部署指令」的「安装选项」里多一条「安装命令用内网地址」，勾上即用内网地址、取消即还原；只在弹窗里出现 | 同一个面板，有时要给内网机器装、有时要给公网机器装 |
+| A+. 部署弹窗里给一个内网勾选框 | 默认就有，不用配 | 「一键部署指令」的「安装选项」里多一条「安装命令用内网地址」，勾上即用内网地址、取消即还原；只在弹窗里出现 | 同一个面板，有时要给内网机器装、有时要给公网机器装 |
 | B. 自动跳转 | `KOMARI_LAN_AUTO=1` | 内网用域名打开会自动跳到 `http://容器IP` | 只在局域网用面板 |
 | C. 内网 DNS 加一条本地记录 | 不用镜像参与 | 域名始终是域名，内网直接连容器，https 不变 | 内网也用 `https://域名` 打开 |
 
@@ -329,27 +341,22 @@ __WB_LAN__        // 勾选框模式（KOMARI_LAN_DEBUG=1 时才有这个变量�
 - 打开节点页看安装命令的 `-e` 后面是不是当前访问地址
 - 「复制」拿到的文本也被同步改写，不只是显示好看
 
-### A+. 部署弹窗里的「安装命令用内网地址」勾选框（`KOMARI_LAN_TOGGLE=1`）
+### A+. 部署弹窗里的「安装命令用内网地址」勾选框（默认开启）
 
-既想默认安静、又偶尔要内网地址时用它：**只在「一键部署指令」弹窗里**多一行，别的地方什么都没有。
-
-```yaml
-environment:
-  KOMARI_LAN_TOGGLE: "1"
-  KOMARI_LAN_PORT: "25774"     # 内网直连用的端口（容器里 komari 的端口，不是 nginx 的）
-```
+**不用配任何变量**：镜像默认就有这一行。只在「一键部署指令」弹窗里出现，别的地方什么都没有。
 
 - 位置：弹窗里「安装选项」那组的**最后一行**，样式和原生那几条选项完全一致（同一套 Radix 组件类名）
 - 文案：只有 `安装命令用内网地址` —— **界面上不显示具体 IP / 端口**。IP 和端口是每台部署各自不同的（容器 IP、nginx 端口都不一样），钉在页面上的那个值对别人就是错的；想知道实际换成了什么地址，看命令框里的 `-e` 就行
 - 默认值：**默认勾上**（域名打开、内网 IP 打开都一样）。很多人在局域网里也是用域名打开面板，按「访问地址是不是内网 IP」判断默认值会让这个选项永远默认不勾
 - 想默认用域名：`KOMARI_LAN_DEFAULT=0`，或者手动取消一次（会记在浏览器里）
+- 想彻底关掉这一行：`KOMARI_LAN_TOGGLE=0`
 - 勾上：命令框里的面板地址实时换成内网地址，**点「复制」拿到的是改写后的**
 - 取消：原样还原成面板自己生成的命令
-- 地址来源：容器启动时自动识别（探测容器 IPv4 + `KOMARI_LAN_PORT`）；自动识别的不对（比如 agent 在别的网段、想走主机名），点勾选框旁边的「**改**」自己填一个，支持主机名。界面上不显示任何 IP/端口，填的地址只存在你自己的浏览器里
+- 地址来源：**全自动**——容器 IPv4 启动时探测，端口从挂进来的 nginx 配置里读（跳过 `443 ssl`，优先非 80 的明文端口，比如 `listen 25774`）。自动识别的不对（比如 agent 在别的网段、想走主机名），点勾选框旁边的「**改**」自己填一个，支持主机名。界面上不显示任何 IP/端口，填的地址只存在你自己的浏览器里
 - 记忆：选择存在浏览器 `localStorage`，刷新还在
 - 弹窗一关控件就随 DOM 消失，仪表盘/设置页等其它页面**不会出现任何多出来的东西**
 
-内网地址是容器启动时探测的；探测不到时不插这一行（不会给一个假地址）。要换成别的地址（比如走主机名、别的端口），用 `KOMARI_LAN_HOST` / `KOMARI_LAN_PORT` 覆盖，`KOMARI_LAN_HOST` 可以直接填主机名。
+内网地址是容器启动时探测的；探测不到时不插这一行（不会给一个假地址）。要强制指定，用 `KOMARI_LAN_HOST` / `KOMARI_LAN_PORT` 覆盖，`KOMARI_LAN_HOST` 可以直接填主机名。
 
 ### B. 自动跳转（`KOMARI_LAN_AUTO`）
 
@@ -427,9 +434,9 @@ nslookup komari.example.com 223.5.5.5          # 应该返回 Cloudflare 的地�
 | 变量 | 默认 | 作用 |
 |---|---|---|
 | `KOMARI_LAN_INJECT` | `1` | 设 `0` 关掉整个「安装命令改写」的注入（勾选框也一起没了） |
-| `KOMARI_LAN_TOGGLE` | `0` | 设 `1` 在「一键部署指令」弹窗里加「安装命令用内网地址」勾选框 |
-| `KOMARI_LAN_HOST` | 自动探测容器 IPv4 | 手动指定内网地址，**可以填主机名**（如 `komari.lan`）；勾选框和 B 模式都用它 |
-| `KOMARI_LAN_PORT` | `80`（勾选框）/ 跟随 nginx（B） | 勾选框用的内网端口（默认 80/443 不会写进地址）。注意填 nginx 的端口，不是 komari 内部端口 |
+| `KOMARI_LAN_TOGGLE` | `1`（开） | 设 `0` 去掉「一键部署指令」弹窗里的勾选框，只保留命令改写 |
+| `KOMARI_LAN_HOST` | 自动探测容器 IPv4 | 手动指定内网地址（覆盖探测），**可以填主机名**（如 `komari.lan`） |
+| `KOMARI_LAN_PORT` | 自动读 nginx 的 `listen` | 只有自动识别不对时才填。注意填 nginx 的明文端口，不是 komari 内部端口 |
 | `KOMARI_LAN_DEFAULT` | `1` | 勾选框默认是否勾上。设 `0` 则默认用域名（适合只想用域名装 agent 的部署） |
 | `KOMARI_LAN_DEBUG` | `0` | 设 `1` 时额外暴露 `window.__WB_LAN__` 与改写日志（`__WB_LAN_STATE__` 不用开也一直有） |
 

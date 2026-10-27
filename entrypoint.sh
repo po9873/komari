@@ -18,6 +18,34 @@ detect_host() {
     fi
 }
 
+# 内网明文端口：从挂进来的 nginx 配置里自己找，不用在 stack 里填。
+# 规则：跳过带 ssl 的（443）；剩下的有「非 80 的明文口」就用它，否则用 80。
+detect_lan_port() {
+    lan_port=""
+    for f in /etc/nginx/http.d/*.conf /etc/nginx/conf.d/*.conf; do
+        [ -f "$f" ] || continue
+        for p in $(awk '
+            /^[ \t]*#/ { next }
+            /^[ \t]*listen[ \t]/ {
+                line = $0
+                if (line ~ /ssl/) next
+                sub(/^[ \t]*listen[ \t]+/, "", line)
+                gsub(/[][]/, "", line)
+                n = split(line, a, "[: ;]+")
+                for (i = 1; i <= n; i++)
+                    if (a[i] ~ /^[0-9]+$/) { print a[i]; break }
+            }' "$f" 2>/dev/null); do
+            [ "$p" = "443" ] && continue
+            if [ "$p" != "80" ]; then
+                lan_port="$p"
+                return 0
+            fi
+            lan_port="80"
+        done
+    done
+    [ -n "$lan_port" ] || lan_port="80"
+}
+
 # 始终注入「安装命令自动改用当前访问地址」脚本（无 UI，不写死 IP）
 # 这个脚本不渲染任何控件，只在前端把安装命令里的面板地址换成 location.origin。
 # KOMARI_LAN_INJECT=0 可关掉（关掉后命令永远是面板默认的地址）。
@@ -36,9 +64,10 @@ EOF
 map $host $wb_redirect_lan { default 0; }
 map $host $wb_lan_authority { default ""; }
 EOF
-    # 勾选框模式（KOMARI_LAN_TOGGLE=1）：把内网地址传给前端。
-    # 内网地址是启动时探测的容器 IP，每家部署各自不同——镜像里零写死。
-    if [ "${KOMARI_LAN_TOGGLE:-0}" = "1" ]; then
+    # 勾选框模式（默认开，KOMARI_LAN_TOGGLE=0 关掉）：把内网地址传给前端。
+    # 内网地址 = 启动时探测的容器 IP + 从 nginx 配置里识别到的明文端口——
+    # 两家部署各不相同，镜像里零写死、stack 里也不用填。
+    if [ "${KOMARI_LAN_TOGGLE:-1}" = "1" ]; then
         detect_host
         dbg_flag=""
         [ "${KOMARI_LAN_DEBUG:-0}" = "1" ] && dbg_flag='\"debug\":1,'
@@ -46,7 +75,11 @@ EOF
         chk_flag=""
         [ "${KOMARI_LAN_DEFAULT:-1}" = "0" ] && chk_flag='\"checked\":0,'
         if [ -n "$lan_host" ]; then
-            lan_port="${KOMARI_LAN_PORT:-80}"
+            if [ -n "${KOMARI_LAN_PORT:-}" ]; then
+                lan_port="$KOMARI_LAN_PORT"
+            else
+                detect_lan_port
+            fi
             lan_scheme="http"
             [ "$lan_port" = "443" ] && lan_scheme="https"
             # 默认端口不写进地址：http 的 80 / https 的 443 都省掉，标签好看也好复制
@@ -84,10 +117,10 @@ sub_filter '</body>' '<script>window.__WB_LAN__=\$wb_boot;</script><script>(func
 # 上游如果 gzip，sub_filter 改不了，这里统一要明文
 proxy_set_header Accept-Encoding "";
 EOF
-    if [ "${KOMARI_LAN_TOGGLE:-0}" = "1" ]; then
-        echo "[entrypoint] 已注入：勾选框（一键部署指令弹窗的安装选项里）+ 命令自动改写"
+    if [ "${KOMARI_LAN_TOGGLE:-1}" = "1" ]; then
+        echo "[entrypoint] 已注入：勾选框（一键部署指令弹窗的安装选项里）+ 命令自动改写（内网端口 ${lan_port:-未识别}）"
     else
-        echo "[entrypoint] 已注入：安装命令按当前访问地址自动改写（无 UI）"
+        echo "[entrypoint] 已注入：安装命令按当前访问地址自动改写（无 UI；KOMARI_LAN_TOGGLE=0 关掉了勾选框）"
     fi
 }
 
@@ -138,18 +171,24 @@ EOF
     echo "[entrypoint] 内网跳转已启用 -> http://$lan_authority"
 }
 
-# 开了内置 ACME、但 /certs 还是空的：先放一张 7 天自签占位证书。
-# 否则 user 的 nginx.conf 里 `listen 443 ssl` 一加载就报找不到 pem，
-# nginx 起不来、整个面板打不开——顺序错了看起来像镜像坏了。
-# acme.sh 签下正式证书后会直接覆盖这两个文件并 reload。
+# /certs 还是空的、但 nginx 已经 `listen 443 ssl` 指着它：先放一张 7 天自签占位证书。
+# 否则 nginx 一加载就报找不到 pem，起不来、整个面板打不开——顺序错了看起来像镜像坏了。
+# 这时域名可能还没识别出来（cloudflared 日志要连上才打），CN 先占位成 komari.local，
+# acme.sh 拿到真域名后直接覆盖这两个文件并 reload。
 setup_bootstrap_cert() {
-    [ "${KOMARI_ACME_ENABLED:-0}" = "1" ] || return 0
-    [ -z "${KOMARI_ACME_DOMAIN:-}" ] && return 0
+    [ "${KOMARI_ACME_ENABLED:-auto}" = "0" ] && return 0
     crt_dir="${KOMARI_ACME_CERTS:-/certs}"
     [ -f "$crt_dir/fullchain.pem" ] && return 0
+    # nginx 没引用这个目录就没什么好占位的
+    refs=0
+    for f in /etc/nginx/http.d/*.conf /etc/nginx/conf.d/*.conf; do
+        [ -f "$f" ] || continue
+        if grep -q -- "$crt_dir" "$f" 2>/dev/null; then refs=1; break; fi
+    done
+    [ "$refs" = "1" ] || return 0
     mkdir -p "$crt_dir" 2>/dev/null || true
     if openssl req -x509 -nodes -newkey rsa:2048 -days 7 \
-        -subj "/CN=${KOMARI_ACME_DOMAIN}" \
+        -subj "/CN=${KOMARI_ACME_DOMAIN:-komari.local}" \
         -keyout "$crt_dir/privkey.pem" -out "$crt_dir/fullchain.pem" >/dev/null 2>&1; then
         chmod 600 "$crt_dir/privkey.pem" 2>/dev/null || true
         echo "[entrypoint] $crt_dir 是空的，先放了张 7 天自签占位证书，等 acme.sh 换正式证书"
@@ -162,10 +201,10 @@ setup_bootstrap_cert
 setup_lan_script
 setup_lan_redirect
 
-if [ "${KOMARI_ACME_ENABLED:-0}" = "1" ] && [ -n "${KOMARI_ACME_DOMAIN:-}" ]; then
-    echo "[entrypoint] 内置 ACME 已启用：${KOMARI_ACME_DOMAIN} -> ${KOMARI_ACME_CERTS:-/certs}（webroot ${KOMARI_ACME_WEBROOT:-/acme}）"
+if [ "${KOMARI_ACME_ENABLED:-auto}" = "0" ]; then
+    echo "[entrypoint] 内置 ACME 已关闭（KOMARI_ACME_ENABLED=0）：不签证书、不动 ${KOMARI_ACME_CERTS:-/certs}"
 else
-    echo "[entrypoint] 内置 ACME 未启用：不签证书、不动 ${KOMARI_ACME_CERTS:-/certs}"
+    echo "[entrypoint] 内置 ACME 待命：域名从 ${KOMARI_ACME_DOMAIN:-「/certs 已有证书 / CF 隧道配置」自动识别} -> ${KOMARI_ACME_CERTS:-/certs}"
 fi
 
 exec /usr/bin/supervisord -c /etc/supervisord.conf

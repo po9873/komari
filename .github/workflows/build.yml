@@ -174,6 +174,7 @@ jobs:
           cat > /tmp/default.conf <<'NGINX'
           server {
               listen 80;
+              listen 25774;
               client_max_body_size 50m;
 
               if ($wb_redirect_lan) {
@@ -199,6 +200,7 @@ jobs:
             -e ADMIN_PASSWORD=test-only-not-a-secret \
             -e KOMARI_LAN_AUTO=1 \
             -e KOMARI_LAN_HOST=10.9.9.9 \
+            -e KOMARI_ACME_ENABLED=0 \
             -v /tmp/default.conf:/etc/nginx/http.d/default.conf:ro \
             "$IMAGE" 2>&1); then
             echo "::error::docker run 失败: $(echo "$RUNOUT" | tr '\n' ' ')"
@@ -248,7 +250,7 @@ jobs:
             echo "::error::IP 访问被误跳转"; exit 1
           fi
 
-          echo "=== 静默模式（不设 KOMARI_LAN_TOGGLE）：不渲染控件、只改命令"
+          echo "=== 静默模式（KOMARI_LAN_TOGGLE=0）：不渲染控件、只改命令"
           docker rm -f ktoggle >/dev/null 2>&1 || true
           diag() {
             echo "::error::$1 | logs=$(docker logs ktoggle --tail=25 2>&1 | tr '\n' '|' | cut -c1-900) | ngx=$(docker exec ktoggle nginx -t 2>&1 | tr '\n' '|' | cut -c1-600)"
@@ -257,6 +259,7 @@ jobs:
             -e TUNNEL_TOKEN=0000000000000000000000000000000000000000000000000000000000000000 \
             -e ADMIN_USERNAME=admin \
             -e ADMIN_PASSWORD=test-only-not-a-secret \
+            -e KOMARI_LAN_TOGGLE=0 \
             -v /tmp/default.conf:/etc/nginx/http.d/default.conf:ro \
             "$IMAGE" 2>&1); then
             echo "::error::静默模式容器启动失败: $(echo "$TROUT" | tr '\n' ' ')"
@@ -305,15 +308,13 @@ jobs:
           fi
           docker rm -f ktoggle >/dev/null 2>&1 || true
 
-          echo "=== 勾选框模式（KOMARI_LAN_TOGGLE=1）：boot 里带内网地址与开关标记"
+          echo "=== 勾选框模式（默认开，不设任何 LAN 变量）：boot 里带内网地址与开关标记，端口自动识别"
           docker rm -f ktog2 >/dev/null 2>&1 || true
           if ! K2OUT=$(docker run -d --name ktog2 \
             -e TUNNEL_TOKEN=0000000000000000000000000000000000000000000000000000000000000000 \
             -e ADMIN_USERNAME=admin \
             -e ADMIN_PASSWORD=test-only-not-a-secret \
-            -e KOMARI_LAN_TOGGLE=1 \
             -e KOMARI_LAN_HOST=10.9.9.9 \
-            -e KOMARI_LAN_PORT=25774 \
             -v /tmp/default.conf:/etc/nginx/http.d/default.conf:ro \
             "$IMAGE" 2>&1); then
             echo "::error::勾选框模式容器启动失败: $(echo "$K2OUT" | tr '\n' ' ')"
@@ -348,9 +349,7 @@ jobs:
             -e TUNNEL_TOKEN=0000000000000000000000000000000000000000000000000000000000000000 \
             -e ADMIN_USERNAME=admin \
             -e ADMIN_PASSWORD=test-only-not-a-secret \
-            -e KOMARI_LAN_TOGGLE=1 \
             -e KOMARI_LAN_HOST=10.9.9.9 \
-            -e KOMARI_LAN_PORT=25774 \
             -e KOMARI_LAN_DEFAULT=0 \
             -v /tmp/default.conf:/etc/nginx/http.d/default.conf:ro \
             "$IMAGE" 2>&1); then
@@ -382,13 +381,13 @@ jobs:
             echo "::error::acme.sh --version 跑不起来: $(echo "$AVER" | tr '\n' ' ' | cut -c1-300)"; exit 1
           fi
           echo "$AVER"
-          # 没配 ACME 时 acme 进程应正常退出，而不是 FATAL / 反复重启
+          # KOMARI_ACME_ENABLED=0 时 acme 进程应正常退出，而不是 FATAL / 反复重启
           # 注意：supervisorctl 对非 RUNNING 状态返回退出码 3，而 run 步骤默认 set -e，
           # 不加 || true 会在断言前就把脚本带崩（上次 smoke 失败就是它）
           AST=$(docker exec ksmoke supervisorctl status acme 2>&1 || true)
           echo "$AST"
           if ! echo "$AST" | grep -q 'EXITED'; then
-            echo "::error::未配置 ACME 时 acme 进程应为 EXITED，实际: $AST"; exit 1
+            echo "::error::ACME 关掉时 acme 进程应为 EXITED，实际: $AST"; exit 1
           fi
 
           echo "=== 内置 acme 引导（空目录挂载 + 自签占位证书）"
@@ -446,6 +445,39 @@ jobs:
             echo "::error::配了 ACME 后 acme 进程起不来: $KAST"; docker rm -f kacme; exit 1
           fi
           docker rm -f kacme >/dev/null 2>&1 || true
+
+          echo "=== ACME 域名自动识别（不填任何域名变量）"
+          cat > /tmp/cf.log <<'CFLOG'
+2026-10-27T12:24:16Z INF Updated to new configuration config="{\"ingress\":[{\"hostname\":\"panel.example.com\", \"service\":\"http://localhost:80\"}, {\"service\":\"http_status:404\"}], \"warp-routing\":{\"enabled\":false}}" version=1
+CFLOG
+          docker rm -f kacme2 >/dev/null 2>&1 || true
+          if ! KA2=$(docker run -d --name kacme2 \
+            -e TUNNEL_TOKEN=0000000000000000000000000000000000000000000000000000000000000000 \
+            -e ADMIN_USERNAME=admin \
+            -e ADMIN_PASSWORD=test-only-not-a-secret \
+            -e KOMARI_ACME_ENABLED=0 \
+            -v /tmp/default.conf:/etc/nginx/http.d/default.conf:ro \
+            "$IMAGE" 2>&1); then
+            echo "::error::域名识别测试容器启动失败: $(echo "$KA2" | tr '\n' ' ')"; exit 1
+          fi
+          sleep 9
+          docker cp /tmp/cf.log kacme2:/tmp/cf.log >/dev/null 2>&1
+          R1=$(docker exec -e KOMARI_CFD_LOG=/tmp/cf.log kacme2 acme-renew.sh --resolve-only 2>&1 || true)
+          echo "$R1"
+          if ! echo "$R1" | grep -q 'panel.example.com'; then
+            echo "::error::没从 cloudflared 日志里识别出 hostname"; docker rm -f kacme2; exit 1
+          fi
+          if ! echo "$R1" | grep -q 'CF 隧道配置'; then
+            echo "::error::识别来源不是 CF 隧道配置"; docker rm -f kacme2; exit 1
+          fi
+          # 已有证书的 CN 优先于 CF 日志：避免每次重启都当成新域名重签
+          docker exec kacme2 sh -c 'mkdir -p /certs && openssl req -x509 -nodes -newkey rsa:2048 -days 1 -subj /CN=cert.example.com -keyout /certs/privkey.pem -out /certs/fullchain.pem >/dev/null 2>&1'
+          R2=$(docker exec -e KOMARI_CFD_LOG=/tmp/cf.log kacme2 acme-renew.sh --resolve-only 2>&1 || true)
+          echo "$R2"
+          if ! echo "$R2" | grep -q 'cert.example.com'; then
+            echo "::error::已有证书的 CN 没被优先采用"; docker rm -f kacme2; exit 1
+          fi
+          docker rm -f kacme2 >/dev/null 2>&1 || true
 
           echo "全部通过"
 
