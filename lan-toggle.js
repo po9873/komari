@@ -1,39 +1,43 @@
-/* 镜像内置：安装命令的内网 / 公网地址开关
+/* 镜像内置：安装命令的「当前访问地址 / 内网地址」勾选框
  *
  * 由 nginx 在返回面板页面时注入（sub_filter），不需要浏览器插件，
  * 也不需要往面板「自定义 Body」里粘任何东西。
  *
- * 容器自己的内网地址由 entrypoint 在启动时探测，
- * 通过 window.__WB_LAN__ 传进来，这个文件里没有任何写死的 IP。
+ * 这次按反馈重做的关键点：
+ *   1. 绝不写死任何 IP —— 用 window.location.host / location.origin，
+ *      也就是「你此刻打开这个面板用的地址」。别人拉镜像跑，地址自动是他们自己的。
+ *   2. 不再是右下角每个页面都冒出来的悬浮胶囊；
+ *      改成直接插到「一键部署指令」页面的「安装选项」分组里，像个真正的选项。
+ *   3. 只在「一键部署指令」页面出现，仪表盘 / 设置 / 其它页面一律不显示。
  *
  * 三个刻意做得很“赖”的地方（都是被现实打过才加的）：
- *   1. 界面放在 closed shadow root 里 —— 页面样式表/广告过滤规则改不到里面；
- *   2. 宿主 div 挂在 documentElement 而不是 body —— 面板重绘 body 不会把它带走；
- *   3. 每 2 秒自检一次，被删了就补回来 —— 挡得住「元素杀手」类的扩展。
+ *   a. 界面放在 closed shadow root 里 —— 页面样式表 / 广告过滤规则改不到里面；
+ *   b. 每 2 秒自检 + MutationObserver 看护 —— 面板重绘 / React 重渲染把它删了就补回来；
+ *   c. 不在部署页时主动把自己摘掉 —— 绝不在别的页面露面。
  */
 (function () {
   "use strict";
 
-  var cfg = window.__WB_LAN__ || {};
-  var authority = String(cfg.authority || "").trim();
-  if (!authority) return;
-
   var HOST_ID = "wb-lan-host";
   var pageHost = location.host;
-  // 本来就是用内网地址访问的：没什么可切换，但仍要显示出来（用户要知道）
-  var alreadyLan = !pageHost || authority === pageHost;
-  var lanOrigin = "http://" + authority;
-  var storageKey = "wb_lan_toggle";
-  var enabled = alreadyLan;
-  if (!alreadyLan) {
-    try {
-      enabled = localStorage.getItem(storageKey) === "1";
-    } catch (e) {}
+  // 用「当前打开面板用的地址」作为安装命令的 endpoint，绝不写死部署者的 IP
+  var lanOrigin = location.origin; // 含 scheme，例如 http://192.168.6.33:25774 或 https://komari.lan
+
+  function isPrivateHost(h) {
+    if (!h) return false;
+    return /(^127\.)|(^10\.)|(^192\.168\.)|(^172\.(1[6-9]|2\d|3[01])\.)|(^169\.254\.)|(^localhost(:[0-9]+)?$)|(^\[::1\])|(^::1$)/.test(h);
   }
+  // 内网 IP / 本机默认开；公网域名默认关，但勾选框始终可见，用户可手动切换
+  var enabled = isPrivateHost(pageHost);
+  try {
+    var saved0 = localStorage.getItem("wb_lan_toggle");
+    if (saved0 !== null) enabled = saved0 === "1";
+  } catch (e) {}
 
   var saved = []; // [{node,value}]，关掉开关时用来还原
   var scheduled = false;
   var busy = false;
+  var uiPending = false;
 
   /* ---------------- 改写安装命令 ---------------- */
 
@@ -47,17 +51,23 @@
     );
   }
 
+  // 从命令里抓出「面板地址」（--endpoint 后面那个），把它整体换成当前访问地址。
+  // 这样无论是下载脚本的 URL 还是 --endpoint，凡是面板自己的地址都会被一起换掉；
+  // 在公网访问时 panelOrigin === location.origin，等于不改，安全无副作用。
   function rewrite(text) {
-    if (!text || text.indexOf(pageHost) === -1) return text;
-    var esc = pageHost.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    return text
-      .replace(new RegExp("https?://" + esc, "g"), lanOrigin)
-      .replace(new RegExp("([\\s\"'(])//" + esc, "g"), "$1//" + authority);
+    if (!text) return text;
+    var m = text.match(/(--endpoint\s+)(https?:\/\/[^\s"']+)/i);
+    if (!m) return text;
+    var panelOrigin = m[2].replace(/\/+$/, "");
+    var target = lanOrigin.replace(/\/+$/, "");
+    if (panelOrigin === target) return text;
+    var esc = panelOrigin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return text.replace(new RegExp(esc, "g"), target);
   }
 
   function patchTextNode(node) {
     var value = node.nodeValue;
-    if (!value || value.indexOf(pageHost) === -1) return;
+    if (!value || !isCommand(value)) return;
     var next = rewrite(value);
     if (next === value) return;
     saved.push({ node: node, value: value });
@@ -79,7 +89,6 @@
     try {
       var list = document.querySelectorAll("textarea, input[type=text]");
       for (var i = 0; i < list.length; i++) patchForm(list[i]);
-      // 全量走一遍文本节点：命令不一定包在 <pre>/<code> 里
       var walker = document.createTreeWalker(
         document.body,
         NodeFilter.SHOW_TEXT,
@@ -116,6 +125,7 @@
     });
   }
 
+  // 复制时拦截：选中的是安装命令就改写后再写剪贴板
   document.addEventListener(
     "copy",
     function (e) {
@@ -131,8 +141,7 @@
     true
   );
 
-  // 面板上的「复制」按钮走 clipboard API，这里包一层。
-  // 浏览器可能不允许改写（严格模式下会抛错），必须吞掉异常，否则界面渲染不出来
+  // 面板上的「复制」按钮走 clipboard API，这里包一层（严格模式可能抛错，吞掉）
   try {
     if (navigator.clipboard && navigator.clipboard.writeText) {
       var nativeWrite = navigator.clipboard.writeText.bind(navigator.clipboard);
@@ -142,39 +151,34 @@
     }
   } catch (e) {}
 
-  /* ---------------- 界面（closed shadow root） ---------------- */
+  /* ---------------- 界面（closed shadow root，插到安装选项里） ---------------- */
 
   var root = null;
   var input = null;
-  var where = null;
 
   var CSS = [
-    ".wb{position:fixed;right:14px;bottom:14px;z-index:2147483647;display:flex;",
-    "align-items:center;gap:8px;padding:10px 14px;border-radius:999px;",
-    "font:13px/1.35 -apple-system,BlinkMacSystemFont,'Segoe UI','Microsoft YaHei',system-ui,sans-serif;",
-    "color:#fafafa;cursor:pointer;user-select:none;",
-    "box-shadow:0 8px 26px rgba(0,0,0,.45);transition:background .15s,border-color .15s}",
-    ".wb input{margin:0;width:15px;height:15px;cursor:pointer;accent-color:#22c55e}",
-    ".wb .addr{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;opacity:.85}",
-    ".wb.on{background:rgba(22,101,52,.96);border:1px solid rgba(74,222,128,.6)}",
-    ".wb.off{background:rgba(24,24,27,.94);border:1px solid rgba(255,255,255,.2)}",
-    ".wb.hidden{display:none}",
+    ":host{display:block;grid-column:1/-1}",
+    ".row{display:flex;align-items:center;gap:8px;padding:9px 11px;margin:6px 0;border-radius:8px;",
+    "font:13px/1.4 -apple-system,BlinkMacSystemFont,'Segoe UI','Microsoft YaHei',system-ui,sans-serif;",
+    "color:#e4e4e7;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);cursor:pointer;user-select:none}",
+    ".row:hover{background:rgba(255,255,255,.07)}",
+    ".row input{margin:0;width:16px;height:16px;cursor:pointer;accent-color:#22c55e;flex:0 0 auto}",
+    ".row .lbl{flex:1 1 auto}",
+    ".row .addr{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;opacity:.8;font-size:12px;flex:0 0 auto}",
+    ".row.on{border-color:rgba(74,222,128,.55);background:rgba(34,197,94,.12)}",
   ].join("");
 
   function paint() {
     if (!root) return;
-    var box = root.querySelector(".wb");
-    if (!box) return;
-    box.className = alreadyLan ? "wb on" : enabled ? "wb on" : "wb off";
+    var box = root.querySelector(".row");
+    if (box) box.className = enabled ? "row on" : "row";
   }
 
   function toggle(on) {
     enabled = !!on;
-    if (!alreadyLan) {
-      try {
-        localStorage.setItem(storageKey, enabled ? "1" : "0");
-      } catch (e) {}
-    }
+    try {
+      localStorage.setItem("wb_lan_toggle", enabled ? "1" : "0");
+    } catch (e) {}
     if (input) input.checked = enabled;
     if (enabled) {
       pass();
@@ -185,60 +189,181 @@
     paint();
   }
 
-  function buildUi() {
+  function buildUi(container) {
     var host = document.createElement("div");
     host.id = HOST_ID;
-    host.style.cssText = "all:initial";
-    // 挂到 <html>，不进 <body>：面板重绘自身内容时不会把它一并清掉
-    (document.documentElement || document.body).appendChild(host);
+    host.style.cssText = "all:initial;display:block;grid-column:1/-1";
+    container.appendChild(host);
 
     root = host.attachShadow({ mode: "closed" });
     root.appendChild(document.createElement("style")).textContent = CSS;
 
     var box = document.createElement("label");
-    box.className = "wb";
-    box.title = alreadyLan
-      ? "当前就是用容器内网地址打开的，安装命令里的地址无需改写。"
-      : "勾选后，面板里复制出来的安装命令会改用容器内网地址（不经过 Cloudflare）。\n给公网机器装节点时请取消勾选。";
+    box.className = "row";
+    box.title =
+      "勾选后，面板里复制出来的安装命令会把「面板地址」换成你当前打开面板用的地址（" +
+      pageHost +
+      "），agent 直连此地址、不经过 Cloudflare。\n在公网访问时勾选无效（本就是公网地址）。";
 
     input = document.createElement("input");
     input.type = "checkbox";
     input.checked = enabled;
-    input.disabled = alreadyLan;
     input.addEventListener("change", function () {
       toggle(input.checked);
     });
 
     var label = document.createElement("span");
-    label.textContent = alreadyLan ? "当前已是内网地址" : "安装命令用内网地址";
+    label.className = "lbl";
+    label.textContent = "安装命令用内网地址（当前：" + pageHost + "）";
 
-    where = document.createElement("span");
+    var where = document.createElement("span");
     where.className = "addr";
-    where.textContent = authority;
+    where.textContent = pageHost;
 
     box.appendChild(input);
     box.appendChild(label);
     box.appendChild(where);
     root.appendChild(box);
     paint();
+    if (enabled) {
+      pass();
+      schedule();
+    }
   }
 
-  function ensureUi() {
-    if (document.getElementById(HOST_ID)) return;
+  /* ---------------- 页面定位：只在「一键部署指令」页，且插到安装选项里 ---------------- */
+
+  function normalize(s) {
+    return (s || "").replace(/\s/g, "");
+  }
+
+  function isDeployPage() {
+    if (!document.body) return false;
+    var t = document.body.innerText || document.body.textContent || "";
+    return normalize(t).indexOf("一键部署指令") !== -1 ||
+      normalize(t).indexOf("安装选项") !== -1;
+  }
+
+  function findOptionsContainer() {
+    // 1) 找「安装选项」标题
+    var heads = document.querySelectorAll(
+      "h1,h2,h3,h4,h5,h6,div,span,p,section,label"
+    );
+    var heading = null;
+    for (var i = 0; i < heads.length; i++) {
+      var el = heads[i];
+      if (
+        el.children.length <= 1 &&
+        el.textContent &&
+        normalize(el.textContent).indexOf("安装选项") !== -1
+      ) {
+        heading = el;
+        break;
+      }
+    }
+    if (!heading) return null;
+
+    // 2) 标题所在区块里找包含复选框的容器
+    var scope = heading.parentElement || heading;
+    var boxes = scope.querySelectorAll("input[type=checkbox]");
+    if (boxes.length === 0) {
+      scope = scope.parentElement || scope;
+      boxes = scope.querySelectorAll("input[type=checkbox]");
+    }
+    if (boxes.length === 0) return null;
+
+    // 3) 向上收到「包含这些复选框的最小公共容器」
+    var container = boxes[boxes.length - 1].parentElement;
+    while (
+      container &&
+      container.parentElement &&
+      container.querySelectorAll("input[type=checkbox]").length < 2 &&
+      container.tagName !== "BODY"
+    ) {
+      container = container.parentElement;
+    }
+    return container;
+  }
+
+  // 找不到安装选项容器时的兜底：插到「指令」区块之前，保证部署页一定看得见
+  function findFallbackMount() {
+    var heads = document.querySelectorAll(
+      "h1,h2,h3,h4,h5,h6,div,span,p,section,label"
+    );
+    for (var i = 0; i < heads.length; i++) {
+      var el = heads[i];
+      if (
+        el.children.length <= 1 &&
+        el.textContent &&
+        normalize(el.textContent).indexOf("指令") !== -1
+      ) {
+        var sec = el.parentElement || el;
+        // 挂在指令区的父容器里、作为最后一个块（出现在命令上方）
+        while (sec && sec.parentElement && sec.tagName !== "BODY" &&
+               sec.querySelectorAll("input,pre,code,textarea").length === 0) {
+          sec = sec.parentElement;
+        }
+        return sec;
+      }
+    }
+    return null;
+  }
+
+  function findMount() {
+    var opt = findOptionsContainer();
+    if (opt) return opt;
+    return findFallbackMount();
+  }
+
+  function mountUi() {
+    var existing = document.getElementById(HOST_ID);
+    if (!isDeployPage()) {
+      // 不在部署页：确保移除，绝不在其它页面显示
+      if (existing && existing.parentElement) {
+        existing.parentElement.removeChild(existing);
+      }
+      root = null;
+      input = null;
+      return;
+    }
+    var container = findMount();
+    if (!container) return; // 页面还没渲染好，下一轮再试
+    if (existing) {
+      if (existing.parentElement !== container) {
+        if (existing.parentElement) existing.parentElement.removeChild(existing);
+        container.appendChild(existing);
+      }
+      return;
+    }
     try {
-      buildUi();
+      buildUi(container);
     } catch (e) {}
+  }
+
+  function scheduleUi() {
+    if (uiPending) return;
+    uiPending = true;
+    setTimeout(function () {
+      uiPending = false;
+      mountUi();
+    }, 300);
   }
 
   /* ---------------- 启动 + 自检看护 ---------------- */
 
   function boot() {
-    ensureUi();
+    mountUi();
     if (enabled) {
       pass();
       schedule();
     }
-    setInterval(ensureUi, 2000);
+    setInterval(mountUi, 2000);
+    try {
+      new MutationObserver(scheduleUi).observe(document.documentElement, {
+        childList: true,
+        subtree: true,
+      });
+    } catch (e) {}
     try {
       new MutationObserver(schedule).observe(document.documentElement, {
         childList: true,
@@ -247,13 +372,13 @@
       });
     } catch (e) {}
     window.__WB_LAN_READY__ = {
-      authority: authority,
       pageHost: pageHost,
-      alreadyLan: alreadyLan,
+      lanOrigin: lanOrigin,
       enabled: enabled,
+      onDeploy: isDeployPage(),
       rendered: !!document.getElementById(HOST_ID),
     };
-    // 排查用：在控制台输入 __WB_LAN_READY__ 就能看到它到底有没有跑起来
+    // 排查用：在控制台输入 __WB_LAN_READY__ 就能看到它到底有没有跑起来、挂在哪
     try {
       console.info("[内网开关] 已加载 ->", window.__WB_LAN_READY__);
     } catch (e) {}
