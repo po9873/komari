@@ -38,6 +38,65 @@ function dialogHtml(cmd) {
   </body></html>`;
 }
 
+// 上游改版的几种可能形态：标题被改名 / 标题没了 / 外面多包一层 / 结构完全认不出
+function dialogHtmlRenamed(cmd) {
+  return `<!doctype html><html><body>
+  <div class="rt-BaseDialogContent" data-state="open">
+    <div class="rt-Flex"><span>一键部署指令</span></div>
+    <label class="text-base font-bold">安装参数</label>
+    <div class="grid grid-cols-2 gap-2">
+      <div class="rt-Flex"><button type="button" role="checkbox" data-state="unchecked"></button><label>禁用远程控制</label></div>
+      <div class="rt-Flex"><button type="button" role="checkbox" data-state="unchecked"></button><label>禁用自动更新</label></div>
+    </div>
+    <label>指令</label>
+    <textarea class="rt-TextAreaInput">${cmd}</textarea>
+  </div></body></html>`;
+}
+
+// 标题整块没了，只剩勾选控件和命令框
+function dialogHtmlNoTitle(cmd) {
+  return `<!doctype html><html><body>
+  <div class="rt-BaseDialogContent" data-state="open">
+    <div class="rt-Flex"><span>一键部署指令</span></div>
+    <div class="grid grid-cols-2 gap-2">
+      <div class="rt-Flex"><button type="button" role="checkbox" data-state="unchecked"></button><label>禁用远程控制</label></div>
+      <div class="rt-Flex"><button type="button" role="checkbox" data-state="unchecked"></button><label>禁用自动更新</label></div>
+    </div>
+    <textarea class="rt-TextAreaInput">${cmd}</textarea>
+  </div></body></html>`;
+}
+
+// 标题外面多包了一层，格子是包裹层的下一个兄弟
+function dialogHtmlWrapped(cmd) {
+  return `<!doctype html><html><body>
+  <div class="rt-BaseDialogContent" data-state="open">
+    <div class="head"><div><label class="t">安装选项</label></div></div>
+    <div class="options"><div class="rt-Flex"><button type="button" role="checkbox"></button><label>禁用远程控制</label></div>
+      <div class="rt-Flex"><button type="button" role="checkbox"></button><label>禁用自动更新</label></div></div>
+    <textarea>${cmd}</textarea>
+  </div></body></html>`;
+}
+
+// 结构完全认不出：没有标题、连勾选控件都没有，只剩命令框
+function dialogHtmlBare(cmd) {
+  return `<!doctype html><html><body>
+  <div class="rt-BaseDialogContent" data-state="open">
+    <div class="hero"><span>一键部署指令</span></div>
+    <div class="cmd"><textarea>${cmd}</textarea></div>
+  </div></body></html>`;
+}
+
+// 不是部署弹窗：textarea 里是别的内容（比如备注），绝不能插东西
+function plainDialogHtml() {
+  return `<!doctype html><html><body>
+  <div class="rt-BaseDialogContent" data-state="open">
+    <label>备注</label>
+    <textarea>这是一段普通备注，不是安装命令</textarea>
+    <div class="grid"><div class="rt-Flex"><button type="button" role="checkbox"></button><label>随便一个选项</label></div>
+      <div class="rt-Flex"><button type="button" role="checkbox"></button><label>另一个选项</label></div></div>
+  </div></body></html>`;
+}
+
 function runAt(url, html, bootstrap, prep) {
   const dom = new JSDOM(html, { url, runScripts: 'outside-only', pretendToBeVisual: true });
   const w = dom.window;
@@ -221,6 +280,86 @@ function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
     await sleep(80);
     check('留空 → 回到自动识别的地址', w2.document.querySelector('textarea').value.includes('-e ' + LAN));
     check('留空后本地记录被清掉', !w2.localStorage.getItem('wb_lan_addr'));
+  }
+
+  // ===== 场景 7：上游把标题从「安装选项」改成「安装参数」=====
+  {
+    console.log('场景 7：上游改标题文案 → 仍能插入');
+    const w = runAt('https://panel.example.com/', dialogHtmlRenamed(CMD), { lanOrigin: LAN, toggle: 1 });
+    await sleep(100);
+    const d = w.document.querySelector('.rt-BaseDialogContent');
+    const ours = d.querySelector('[data-wb-lan]');
+    check('换文案后仍有这一行', !!ours);
+    check('落在选项格子里', !!ours && ours.parentElement.className.includes('grid'));
+    check('anchor = title-next', w.__WB_LAN_STATE__.anchor === 'title-next');
+    check('命令照样被改写', d.querySelector('textarea').value.includes('-e ' + LAN));
+  }
+
+  // ===== 场景 8：标题整块没了，靠勾选控件反推 =====
+  {
+    console.log('场景 8：标题消失 → 按勾选控件反推容器');
+    const w = runAt('https://panel.example.com/', dialogHtmlNoTitle(CMD), { lanOrigin: LAN, toggle: 1 });
+    await sleep(100);
+    const d = w.document.querySelector('.rt-BaseDialogContent');
+    const ours = d.querySelector('[data-wb-lan]');
+    check('没有标题也能插上', !!ours);
+    check('插进了勾选控件所在的格子', !!ours && ours.parentElement.className.includes('grid'));
+    check('anchor = checkbox-cluster', w.__WB_LAN_STATE__.anchor === 'checkbox-cluster');
+  }
+
+  // ===== 场景 9：标题被多包一层 =====
+  {
+    console.log('场景 9：标题被包了一层 → 往上层找兄弟');
+    const w = runAt('https://panel.example.com/', dialogHtmlWrapped(CMD), { lanOrigin: LAN, toggle: 1 });
+    await sleep(100);
+    const d = w.document.querySelector('.rt-BaseDialogContent');
+    const ours = d.querySelector('[data-wb-lan]');
+    check('包一层也插得上', !!ours);
+    check('插到 .options 里', !!ours && ours.parentElement.className === 'options');
+    check('anchor = title-up', w.__WB_LAN_STATE__.anchor === 'title-up');
+  }
+
+  // ===== 场景 10：结构完全认不出 → 退到命令框上方，且不出弹窗 =====
+  {
+    console.log('场景 10：结构完全认不出 → 插在命令框上方');
+    const w = runAt('https://panel.example.com/', dialogHtmlBare(CMD), { lanOrigin: LAN, toggle: 1 });
+    await sleep(100);
+    const d = w.document.querySelector('.rt-BaseDialogContent');
+    const ours = d.querySelector('[data-wb-lan]');
+    check('最后退路也能插上', !!ours);
+    check('插在命令框上方（同一父节点）', !!ours && !!ours.nextElementSibling && ours.nextElementSibling.className === 'cmd');
+    check('anchor = before-textarea', w.__WB_LAN_STATE__.anchor === 'before-textarea');
+    check('没有跑到弹窗外', w.document.body.querySelectorAll('[data-wb-lan]').length === 1);
+    check('命令仍然被改写', d.querySelector('textarea').value.includes('-e ' + LAN));
+  }
+
+  // ===== 场景 11：不是部署弹窗 → 一个元素都不许插 =====
+  {
+    console.log('场景 11：普通弹窗（非安装命令）→ 绝不插入');
+    const w = runAt('https://panel.example.com/', plainDialogHtml(), { lanOrigin: LAN, toggle: 1 });
+    await sleep(200);
+    check('普通弹窗里零插入', w.document.querySelectorAll('[data-wb-lan]').length === 0);
+    check('anchor = skip:not-deploy', w.__WB_LAN_STATE__.anchor === 'skip:not-deploy');
+    check('备注文本没被改', w.document.querySelector('textarea').value.includes('普通备注'));
+  }
+
+  // ===== 场景 12：React 重建格子 → 自动补回且不重复 =====
+  {
+    console.log('场景 12：React 重建格子 → 补回不重复');
+    const w = runAt('https://panel.example.com/', dialogHtml(CMD), { lanOrigin: LAN, toggle: 1 });
+    await sleep(100);
+    const d = w.document.querySelector('.rt-BaseDialogContent');
+    const grid = d.querySelector('.grid');
+    d.querySelector('[data-wb-lan]').remove(); // 模拟 React 把我们插的节点整块换掉
+    const item = w.document.createElement('div');
+    item.className = 'rt-Flex';
+    item.appendChild(w.document.createElement('button'));
+    grid.appendChild(item);
+    await sleep(900);
+    const rows = d.querySelectorAll('[data-wb-lan]');
+    check('重建后自动补回，且只有一行', rows.length === 1, 'count=' + rows.length);
+    check('补回来的行仍在选项格子里', rows[0] && rows[0].parentElement === grid);
+    check('补回来的行默认仍是勾上的', rows[0] && rows[0].querySelector('button[role=checkbox]').getAttribute('data-state') === 'checked');
   }
 
   console.log(fail === 0 ? '\n全部通过 ✓' : `\n${fail} 项失败 ✗`);

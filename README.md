@@ -431,7 +431,7 @@ nslookup komari.example.com 223.5.5.5          # 应该返回 Cloudflare 的地�
 | `KOMARI_LAN_HOST` | 自动探测容器 IPv4 | 手动指定内网地址，**可以填主机名**（如 `komari.lan`）；勾选框和 B 模式都用它 |
 | `KOMARI_LAN_PORT` | `80`（勾选框）/ 跟随 nginx（B） | 勾选框用的内网端口（默认 80/443 不会写进地址）。注意填 nginx 的端口，不是 komari 内部端口 |
 | `KOMARI_LAN_DEFAULT` | `1` | 勾选框默认是否勾上。设 `0` 则默认用域名（适合只想用域名装 agent 的部署） |
-| `KOMARI_LAN_DEBUG` | `0` | 设 `1` 时暴露 `window.__WB_LAN__` 便于排查（生产别开） |
+| `KOMARI_LAN_DEBUG` | `0` | 设 `1` 时额外暴露 `window.__WB_LAN__` 与改写日志（`__WB_LAN_STATE__` 不用开也一直有） |
 
 ### 实现说明
 
@@ -440,7 +440,28 @@ nslookup komari.example.com 223.5.5.5          # 应该返回 Cloudflare 的地�
 - 静默模式（默认）**不创建任何 DOM 元素**——没有 shadow root、没有浮动层，只改 textarea 的值和剪贴板内容
 - 勾选框模式只创建**一行**：`安装选项` 那组末尾的一个勾选行，弹窗移除时随之消失
 - 光写 `textarea.value` 不够：面板是 React 受控组件，下一次重渲染会用自己 state 里的原命令把 DOM 盖回去。脚本因此在 textarea 上劫持了 `value` 的 setter——面板每次回写都被拦下改写，原始命令另存一份用于「取消勾选还原」
+- 「安装选项」这一行的插入位置不写死单一路径，按上游 DOM 做**多级退路**（上游改版本时不会一说没就没）：
+  1. 认标题文案（`安装选项` / `安装参数` / `Install options`），插到它后面的格子 —— 正常情况走这条
+  2. 标题外面多包了一层 → 往上层继续找兄弟
+  3. 标题整个没了 → 按弹窗里的勾选控件反推它们共同的父容器
+  4. 结构完全认不出 → 插在命令框上方（位置略差，功能还在）
+- 动手前有一道闸门：**命令框里必须确实是安装命令**（`install.sh` / `install.ps1` / `komari-agent` / `--endpoint` / `-e http…`），或弹窗标题写着「一键部署」。别的弹窗、别的页面一个元素都不插
+- React 重建了选项格子时，脚本会把失效的旧行清掉重插，**不会出现两行**
 - 地址取浏览器 `location.origin`（静默）或启动探测的容器 IP（勾选框），不是镜像写死的；换台机器、换种访问方式，改写的都是各自正确的地址
+
+#### 怎么确认这一行插上了（上游改版后排查用）
+
+页面上不显示任何状态，但控制台里随时能问：
+
+```js
+__WB_LAN_STATE__
+// { mode: "toggle", lanOrigin: "http://192.0.2.10:8080", dialog: true, row: true, anchor: "title-next" }
+```
+
+- `row: true` ⇒ 这一行确实插进了弹窗；`row: false` + `anchor: "none"` ⇒ 上游结构变了、四条退路都没认出来（这时内网改写仍然生效，只是没有勾选框）
+- `anchor` 记录走的是哪条路：`title-next`（正常）/ `title-up`（标题被包了一层）/ `checkbox-cluster`（标题没了）/ `before-textarea`（结构完全变了）/ `skip:not-deploy`（当前弹窗不是部署弹窗，故意不插）
+- `dialog: false` ⇒ 弹窗没打开，属于正常
+
 - B 模式（302 跳转）只有显式设 `KOMARI_LAN_AUTO=1` 才会写进 nginx 配置
 
 如果之前往面板「设置 → 自定义美化 → 自定义 Body」里粘过切换地址的脚本，请把那段清空——现在由镜像统一处理，两段一起跑会互相覆盖。

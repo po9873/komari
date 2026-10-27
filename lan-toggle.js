@@ -25,6 +25,11 @@
  *      把 DOM 值盖回去（表现为「勾上了但命令没变/又变回原样」）。
  *      所以要在 textarea 元素上劫持 value 的 setter：React 每次回写都被
  *      我们拦下，改写后再落到 DOM，原始命令单独记在 __wbBox.orig 里。
+ *   d) 「安装选项」这一行的插入位置靠上游 DOM 特征定位，所以做了多级退路：
+ *      标题文案（安装选项/安装参数/Install options）→ 标题的兄弟 / 上层兄弟 →
+ *      按勾选控件反推格子 → 实在认不出就插在命令框上方。走的哪条记录在
+ *      __WB_LAN_STATE__.anchor 里，上游改版导致插不上时一眼能看出来。
+ *      另外只有「命令框里确实是安装命令」的弹窗才会动手，别处一个元素都不插。
  */
 (function () {
   "use strict";
@@ -98,7 +103,18 @@
 
   /* ---------- 状态与调试日志 ---------- */
 
-  var state = { checked: null, row: null, log: [] };
+  // anchor：这次是靠哪条路径找到「安装选项」格子的（上游改版后看这里就知道降级到哪一层）
+  var state = { checked: null, row: null, anchor: "none", log: [] };
+
+  // 运行时状态（始终暴露，不渲染任何东西）：上游改版导致插不上时，一眼能看出来
+  //   window.__WB_LAN_STATE__ → { mode, lanOrigin, dialog, row, anchor }
+  var health = {
+    mode: toggleMode ? "toggle" : "silent",
+    lanOrigin: lanOrigin || null,
+    dialog: false,
+    row: false,
+    anchor: "none",
+  };
 
   function slog(msg, v) {
     if (!DEBUG) return;
@@ -150,7 +166,10 @@
   }
 
   function getDialog() {
-    var list = document.querySelectorAll(".rt-BaseDialogContent");
+    // 只认「看得见、里面还有命令框」的弹窗。Radix 的类名换了也能靠 role 兜住。
+    var list = document.querySelectorAll(
+      '.rt-BaseDialogContent, [role="dialog"], [role="alertdialog"]'
+    );
     for (var i = list.length - 1; i >= 0; i--) {
       if (visible(list[i]) && list[i].querySelector("textarea")) return list[i];
     }
@@ -205,24 +224,132 @@
     btn.setAttribute("data-state", state.checked ? "checked" : "unchecked");
   }
 
-  function ensureRow(dlg) {
-    if (!lanOrigin) return false; // 没有可换的内网地址：不插这个没用的选项
-    if (state.row && dlg.contains(state.row)) return true;
-    state.row = null;
-    var labels = dlg.querySelectorAll("label");
-    var grid = null;
-    for (var i = 0; i < labels.length; i++) {
-      if (labels[i].textContent.trim() === "安装选项") {
-        grid = labels[i].nextElementSibling;
-        break;
+  /* ---------- 找「安装选项」的格子：多级退路，上游改版也尽量插得上 ---------- */
+
+  function textOf(el) {
+    return (el && el.textContent ? el.textContent : "").replace(/\s+/g, "");
+  }
+
+  function checkboxSel() {
+    return 'button[role="checkbox"], input[type="checkbox"]';
+  }
+
+  function hasOptions(el) {
+    try {
+      return !!(el && el.querySelector && el.querySelector(checkboxSel()));
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // 只有在「部署指令」弹窗里才动手：命令框里必须真的是安装命令（或弹窗标题写着部署指令）。
+  // 这条闸门负责「绝不跑到别的页面/别的弹窗里去」。
+  function isDeployDialog(dlg) {
+    var tas = dlg.querySelectorAll("textarea");
+    for (var i = 0; i < tas.length; i++) {
+      if (isCommand(TA_DESC.get.call(tas[i]))) return true;
+      if (tas[i].__wbBox && isCommand(tas[i].__wbBox.orig)) return true;
+    }
+    var t = textOf(dlg);
+    return t.indexOf("一键部署") !== -1 || t.indexOf("部署指令") !== -1;
+  }
+
+  // 标题文案可能被上游改（安装选项/安装参数/Install options），只认「安装」开头这类短标签
+  function findOptionsTitle(dlg) {
+    var cands = dlg.querySelectorAll("label,span,strong,b,h1,h2,h3,h4,h5,h6,div,p");
+    var leaf = null;
+    var loose = null;
+    for (var i = 0; i < cands.length; i++) {
+      var el = cands[i];
+      var t = textOf(el);
+      if (!t || t.length > 10) continue; // 标题很短，长文本是整块容器，跳过
+      var hit =
+        t.indexOf("安装选项") === 0 ||
+        t === "安装参数" ||
+        t === "安装配置" ||
+        /^installoptions?$/i.test(t);
+      if (!hit) continue;
+      if (!el.children.length) leaf = el; // 纯文字节点最可信，取最后一个（嵌套时是里面那层）
+      else if (!loose) loose = el;
+    }
+    return leaf || loose;
+  }
+
+  // 返回 {node, how, before}；before 不为空表示插在它前面，否则追加到 node 末尾
+  function findOptionSlot(dlg) {
+    var title = findOptionsTitle(dlg);
+    if (title) {
+      // 标题的下一个兄弟就是格子；中间可能多包了一层，往后多试几个
+      var el = title.nextElementSibling;
+      for (var i = 0; i < 3 && el; i++) {
+        if (hasOptions(el)) return { node: el, how: "title-next" };
+        el = el.nextElementSibling;
+      }
+      // 标题被包在容器里，格子可能是容器的下一个兄弟
+      var up = title.parentElement;
+      for (var k = 0; k < 2 && up && up !== dlg; k++) {
+        var sib = up.nextElementSibling;
+        while (sib) {
+          if (hasOptions(sib)) return { node: sib, how: "title-up" };
+          sib = sib.nextElementSibling;
+        }
+        up = up.parentElement;
       }
     }
-    if (!grid) return false;
+    // 退路 2：不管标题，直接按勾选控件反推它们共同的父容器
+    var boxes = dlg.querySelectorAll(checkboxSel());
+    if (boxes.length) {
+      var parent = boxes[0].parentElement;
+      for (var g = 0; g < 5 && parent && parent !== dlg; g++) {
+        var inside = parent.querySelectorAll(checkboxSel()).length;
+        if (inside >= 2 && parent.children.length >= 2) {
+          return { node: parent, how: "checkbox-cluster" };
+        }
+        parent = parent.parentElement;
+      }
+    }
+    // 退路 3：结构完全不认识了，插在命令框所在那一块的前面——功能还在，位置略差。
+    // 注意只能插在弹窗内部，绝不往 body / html 上跑。
+    var ta = dlg.querySelector("textarea");
+    if (ta) {
+      var block = ta;
+      while (block.parentElement && block.parentElement !== dlg) block = block.parentElement;
+      if (block.parentElement === dlg) {
+        return { node: dlg, how: "before-textarea", before: block };
+      }
+    }
+    return null;
+  }
+
+  function ensureRow(dlg) {
+    if (!lanOrigin) return false; // 没有可换的内网地址：不插这个没用的选项
+    if (!isDeployDialog(dlg)) {
+      state.anchor = "skip:not-deploy";
+      return false;
+    }
+    // 已经插过且还挂在 DOM 上（事件绑定仍在）→ 什么都不做
+    if (state.row && dlg.contains(state.row) && state.row.querySelector(checkboxSel())) return true;
+    // React 重渲染后留下的旧行（引用对不上，事件已失效）→ 清掉重建，避免出现两行
+    var stale = dlg.querySelectorAll("[data-wb-lan]");
+    for (var s = 0; s < stale.length; s++) {
+      if (stale[s].parentNode) stale[s].parentNode.removeChild(stale[s]);
+    }
+    state.row = null;
+
+    var slot = findOptionSlot(dlg);
+    if (!slot) {
+      state.anchor = "none";
+      return false;
+    }
+    state.anchor = slot.how;
+    slog("anchor", slot.how);
 
     var row = document.createElement("div");
     row.className = "rt-Flex rt-r-ai-center rt-r-gap-2";
-    row.style.gridColumn = "1 / -1";
     row.setAttribute("data-wb-lan", "1");
+    // 落在选项格子里时横跨整行；退路 3（插在命令框上方）时给点上下间距
+    if (slot.before) row.style.margin = "4px 0";
+    else row.style.gridColumn = "1 / -1";
 
     var btn = document.createElement("button");
     btn.type = "button";
@@ -249,7 +376,9 @@
     row.appendChild(btn);
     row.appendChild(lab);
     row.appendChild(edit);
-    grid.appendChild(row);
+    // 上游结构正常时追加到选项格子末尾；结构认不出时插在命令框上方
+    if (slot.before && slot.before.parentNode) slot.before.parentNode.insertBefore(row, slot.before);
+    else slot.node.appendChild(row);
 
     function setOverride(v) {
       override = (v || "").replace(/\/+$/, "");
@@ -344,12 +473,17 @@
 
   function togglePass() {
     var dlg = getDialog();
+    health.dialog = !!dlg;
     if (!dlg) {
       state.row = null; // 弹窗关了：控件随 DOM 消失，只保留勾选状态
+      health.row = false;
       return;
     }
     if (state.checked === null) state.checked = defaultChecked();
-    if (!ensureRow(dlg)) return;
+    var ok = ensureRow(dlg);
+    health.anchor = state.anchor;
+    health.row = !!(ok && state.row && dlg.contains(state.row));
+    if (!ok) return;
     applyAll(dlg);
   }
 
@@ -408,11 +542,18 @@
         attributeFilter: ["data-state", "value"],
       });
     } catch (e) {}
+    // 状态对象一直挂着（纯数据，不影响任何界面）：
+    // 打开弹窗后 __WB_LAN_STATE__.row 为 true 就说明这一行插上了；
+    // anchor 会告诉你走的是哪条退路（title-next / title-up / checkbox-cluster / before-textarea）
+    try {
+      window.__WB_LAN_STATE__ = health;
+    } catch (e) {}
     if (DEBUG) {
       window.__WB_LAN_READY__ = {
         lanOrigin: lanOrigin || null,
         toggle: toggleMode,
         href: location.href,
+        health: health,
         dbg: state,
       };
     }
