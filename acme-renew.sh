@@ -161,15 +161,26 @@ reload_nginx() {
     fi
 }
 
+# acme.sh 的域名目录名：ECC 证书是 `<域名>_ecc`，RSA 才是不带后缀的。
+# 两种都认，否则会把「已经签过」误判成「首次签发」，白白重签还可能失败。
+acme_domain_dir() {
+    for d in "$ACME_HOME/$DOMAIN" "$ACME_HOME/${DOMAIN}_ecc"; do
+        if [ -f "$d/$DOMAIN.conf" ]; then printf '%s' "$d"; return 0; fi
+    done
+    return 1
+}
+
 issue() {
     log "首次签发 $DOMAIN（webroot=$WEBROOT，server=$SERVER）"
-    set -- --issue -d "$DOMAIN" -w "$WEBROOT" --server "$SERVER"
+    set -- --issue -d "$DOMAIN" -w "$WEBROOT" --server "$SERVER" --keylength ec-256
     [ -n "$EMAIL" ] && set -- "$@" --accountemail "$EMAIL"
     "$ACME_BIN" "$@"
 }
 
 install_cert() {
-    "$ACME_BIN" --install-cert -d "$DOMAIN" \
+    ecc=""
+    case "${1:-}" in *_ecc) ecc="--ecc" ;; esac
+    "$ACME_BIN" --install-cert -d "$DOMAIN" $ecc \
         --key-file "$CERT_DIR/privkey.pem" \
         --fullchain-file "$CERT_DIR/fullchain.pem" \
         --reloadcmd "$NGINX -s reload"
@@ -179,9 +190,9 @@ log "已启用：域名=$DOMAIN server=$SERVER webroot=$WEBROOT 证书目录=$CE
 
 while true; do
     # acme.sh 自己的记录才代表「签过」——/certs 里可能是你之前手工放进去的
-    if [ ! -f "$ACME_HOME/$DOMAIN/$DOMAIN.conf" ]; then
+    if ! dir=$(acme_domain_dir); then
         if issue; then
-            install_cert
+            install_cert "$(acme_domain_dir || true)"
             reload_nginx
             log "签发完成，$CERT_DIR/fullchain.pem 已就位"
         else
@@ -190,7 +201,7 @@ while true; do
             continue
         fi
     else
-        log "检查续期"
+        log "检查续期（记录在 $dir）"
         "$ACME_BIN" --cron 2>&1 | tail -n 6 || log "acme.sh --cron 返回非 0"
         # 到期前 30 天内才会真的换证书；没到期时 reload 也无害
         reload_nginx
