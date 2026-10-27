@@ -291,8 +291,8 @@ jobs:
           fi
           # 脚本里必须有改写逻辑（---endpoint / -e 都要认）
           for M in '__WB_LAN__' '--endpoint' 'targetOrigin' 'install\.(sh|ps1)'; do
-            # 用 -e：模式里可能有 --endpoint 这种以 - 开头的串，会被 grep 当选项
-            if ! echo "$JS" | grep -q -e "$M"; then
+            # -E: 模式里有 install\.(sh|ps1) 这种分组；-e: --endpoint 会被当成选项
+            if ! echo "$JS" | grep -q -E -e "$M"; then
               diag "注入脚本缺关键逻辑：$M"; docker rm -f ktoggle; exit 1
             fi
           done
