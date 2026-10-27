@@ -3,17 +3,18 @@
  * 由 nginx 在返回面板页面时注入（sub_filter），不需要浏览器插件，
  * 也不需要往面板「自定义 Body」里粘任何东西。
  *
- * 这次按反馈重做的关键点：
- *   1. 绝不写死任何 IP —— 用 window.location.host / location.origin，
- *      也就是「你此刻打开这个面板用的地址」。别人拉镜像跑，地址自动是他们自己的。
- *   2. 不再是右下角每个页面都冒出来的悬浮胶囊；
- *      改成直接插到「一键部署指令」页面的「安装选项」分组里，像个真正的选项。
- *   3. 只在「一键部署指令」页面出现，仪表盘 / 设置 / 其它页面一律不显示。
+ * 关键点（踩过坑后定的）：
+ *   1. 绝不写死任何 IP —— 用 location.host / location.origin，
+ *      即「你此刻打开面板用的地址」。别人拉镜像跑，地址自动是他们自己的。
+ *   2. 只出现在「一键部署指令」弹窗里，作为弹窗选项列表中的一条选项。
+ *      仪表盘 / 节点列表 / 设置等任何其它页面一律不显示。
+ *   3. 判定依据不是「一键部署指令」这几个字（那是个常驻导航按钮，每页都有），
+ *      而是：页面里有没有真正弹出来的、内含安装命令（install.sh / --endpoint）的弹窗。
  *
  * 三个刻意做得很“赖”的地方（都是被现实打过才加的）：
  *   a. 界面放在 closed shadow root 里 —— 页面样式表 / 广告过滤规则改不到里面；
  *   b. 每 2 秒自检 + MutationObserver 看护 —— 面板重绘 / React 重渲染把它删了就补回来；
- *   c. 不在部署页时主动把自己摘掉 —— 绝不在别的页面露面。
+ *   c. 弹窗关掉时主动把自己摘掉 —— 绝不在别的页面露面。
  */
 (function () {
   "use strict";
@@ -151,13 +152,13 @@
     }
   } catch (e) {}
 
-  /* ---------------- 界面（closed shadow root，插到安装选项里） ---------------- */
+  /* ---------------- 界面（closed shadow root，插到弹窗选项列表里） ---------------- */
 
   var root = null;
   var input = null;
 
   var CSS = [
-    ":host{display:block;grid-column:1/-1}",
+    ":host{display:block;width:100%}",
     ".row{display:flex;align-items:center;gap:8px;padding:9px 11px;margin:6px 0;border-radius:8px;",
     "font:13px/1.4 -apple-system,BlinkMacSystemFont,'Segoe UI','Microsoft YaHei',system-ui,sans-serif;",
     "color:#e4e4e7;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);cursor:pointer;user-select:none}",
@@ -192,7 +193,7 @@
   function buildUi(container) {
     var host = document.createElement("div");
     host.id = HOST_ID;
-    host.style.cssText = "all:initial;display:block;grid-column:1/-1";
+    host.style.cssText = "all:initial;display:block;width:100%";
     container.appendChild(host);
 
     root = host.attachShadow({ mode: "closed" });
@@ -231,94 +232,140 @@
     }
   }
 
-  /* ---------------- 页面定位：只在「一键部署指令」页，且插到安装选项里 ---------------- */
+  /* ---------------- 定位：只认「含安装命令的弹窗」，并插进选项列表 ---------------- */
 
-  function normalize(s) {
-    return (s || "").replace(/\s/g, "");
-  }
-
-  function isDeployPage() {
-    if (!document.body) return false;
-    var t = document.body.innerText || document.body.textContent || "";
-    return normalize(t).indexOf("一键部署指令") !== -1 ||
-      normalize(t).indexOf("安装选项") !== -1;
-  }
-
-  function findOptionsContainer() {
-    // 1) 找「安装选项」标题
-    var heads = document.querySelectorAll(
-      "h1,h2,h3,h4,h5,h6,div,span,p,section,label"
-    );
-    var heading = null;
-    for (var i = 0; i < heads.length; i++) {
-      var el = heads[i];
-      if (
-        el.children.length <= 1 &&
-        el.textContent &&
-        normalize(el.textContent).indexOf("安装选项") !== -1
-      ) {
-        heading = el;
-        break;
+  function isVisible(el) {
+    if (!el) return false;
+    var st = getComputedStyle(el);
+    if (st.display === "none" || st.visibility === "hidden" || st.opacity === "0")
+      return false;
+    // 再确认祖先没有 display:none（offsetParent 为 null 多半是隐藏）
+    if (el.offsetParent === null) {
+      var p = el.parentElement;
+      while (p && p !== document.body) {
+        var ps = getComputedStyle(p);
+        if (ps.display === "none" || ps.visibility === "hidden") return false;
+        p = p.parentElement;
       }
     }
-    if (!heading) return null;
-
-    // 2) 标题所在区块里找包含复选框的容器
-    var scope = heading.parentElement || heading;
-    var boxes = scope.querySelectorAll("input[type=checkbox]");
-    if (boxes.length === 0) {
-      scope = scope.parentElement || scope;
-      boxes = scope.querySelectorAll("input[type=checkbox]");
-    }
-    if (boxes.length === 0) return null;
-
-    // 3) 向上收到「包含这些复选框的最小公共容器」
-    var container = boxes[boxes.length - 1].parentElement;
-    while (
-      container &&
-      container.parentElement &&
-      container.querySelectorAll("input[type=checkbox]").length < 2 &&
-      container.tagName !== "BODY"
-    ) {
-      container = container.parentElement;
-    }
-    return container;
+    return true;
   }
 
-  // 找不到安装选项容器时的兜底：插到「指令」区块之前，保证部署页一定看得见
-  function findFallbackMount() {
-    var heads = document.querySelectorAll(
-      "h1,h2,h3,h4,h5,h6,div,span,p,section,label"
+  // 找安装命令锚点：扫描文本节点，找到含 install.sh / --endpoint 的那个，向上回到块级容器。
+  // 这条命令只存在于「一键部署指令」弹窗里，所以能精准区分“弹窗开着”和“导航只是有个按钮”。
+  function findCommandElement() {
+    if (!document.body) return null;
+    var walker = document.createTreeWalker(
+      document.body,
+      NodeFilter.SHOW_TEXT,
+      null
     );
-    for (var i = 0; i < heads.length; i++) {
-      var el = heads[i];
+    var n;
+    while ((n = walker.nextNode())) {
+      var v = n.nodeValue || "";
       if (
-        el.children.length <= 1 &&
-        el.textContent &&
-        normalize(el.textContent).indexOf("指令") !== -1
+        v.indexOf("install.sh") !== -1 ||
+        v.indexOf("install.ps1") !== -1 ||
+        v.indexOf("--endpoint") !== -1
       ) {
-        var sec = el.parentElement || el;
-        // 挂在指令区的父容器里、作为最后一个块（出现在命令上方）
-        while (sec && sec.parentElement && sec.tagName !== "BODY" &&
-               sec.querySelectorAll("input,pre,code,textarea").length === 0) {
-          sec = sec.parentElement;
-        }
-        return sec;
+        var el = n.parentElement;
+        while (
+          el &&
+          el !== document.body &&
+          getComputedStyle(el).display === "inline"
+        )
+          el = el.parentElement;
+        return el || n.parentElement;
       }
     }
     return null;
   }
 
-  function findMount() {
-    var opt = findOptionsContainer();
-    if (opt) return opt;
-    return findFallbackMount();
+  // 从命令锚点往上爬，找到弹窗的根容器（dialog / 含 modal 类名的 / 顶层 portal）
+  function getModalRoot(fromEl) {
+    var el = fromEl;
+    while (el && el.parentElement && el.parentElement !== document.body) {
+      var role = el.getAttribute ? el.getAttribute("role") : null;
+      var cls = (el.className || "").toString();
+      if (
+        role === "dialog" ||
+        /\b(modal|dialog|overlay|portal|popup)\b/i.test(cls)
+      ) {
+        return el;
+      }
+      el = el.parentElement;
+    }
+    // 没匹配到语义标记：回到“父级是 body”的顶层容器
+    while (el && el.parentElement && el.parentElement !== document.body) {
+      el = el.parentElement;
+    }
+    return el;
+  }
+
+  // 收集弹窗里的“选项勾选框”：有文字 label、且本身不是命令框
+  function collectOptionControls(modal) {
+    var boxes = modal.querySelectorAll(
+      "input[type=checkbox],input[type=radio],[role=switch],[role=checkbox]"
+    );
+    var out = [];
+    for (var i = 0; i < boxes.length; i++) {
+      var lab = boxes[i].closest ? boxes[i].closest("label") : null;
+      var lb = lab
+        ? lab.textContent.trim()
+        : (boxes[i].getAttribute("aria-label") || "").trim();
+      if (lb && !isCommand(lb)) out.push(boxes[i]);
+    }
+    if (out.length === 0) out = Array.prototype.slice.call(boxes);
+    return out;
+  }
+
+  // 弹窗是否打开（且可见）
+  function getInstallModal() {
+    var cmd = findCommandElement();
+    if (!cmd || !isVisible(cmd)) return null;
+    var modal = getModalRoot(cmd);
+    if (!modal || !isVisible(modal)) return null;
+    return modal;
+  }
+
+  // 把开关作为“最后一条选项”插进选项列表：找选项控件们的共同祖先，
+  // 再插到最后一个选项控件所在行的后面，保证它长得像选项、落在选项区末尾。
+  function findMount(modal) {
+    var opt = collectOptionControls(modal);
+    if (opt.length >= 1) {
+      // 共同祖先
+      var container = opt[0].parentElement;
+      while (container && container !== modal) {
+        var allIn = true;
+        for (var j = 0; j < opt.length; j++) {
+          if (!container.contains(opt[j])) {
+            allIn = false;
+            break;
+          }
+        }
+        if (!allIn) break;
+        if (container.parentElement === modal) break;
+        container = container.parentElement;
+      }
+      // 插到最后一个选项控件的“行”之后
+      var lastRow =
+        (opt[opt.length - 1].closest &&
+          opt[opt.length - 1].closest("label")) ||
+        opt[opt.length - 1].parentElement;
+      if (container && lastRow && lastRow.parentElement) {
+        return { container: lastRow.parentElement, after: lastRow };
+      }
+      if (container) return { container: container, after: null };
+    }
+    // 兜底：直接挂到弹窗根里（命令上方），保证弹窗里一定看得见
+    return { container: modal, after: null };
   }
 
   function mountUi() {
     var existing = document.getElementById(HOST_ID);
-    if (!isDeployPage()) {
-      // 不在部署页：确保移除，绝不在其它页面显示
+    var modal = getInstallModal();
+    if (!modal) {
+      // 弹窗没开：确保移除，绝不在其它页面显示
       if (existing && existing.parentElement) {
         existing.parentElement.removeChild(existing);
       }
@@ -326,18 +373,31 @@
       input = null;
       return;
     }
-    var container = findMount();
-    if (!container) return; // 页面还没渲染好，下一轮再试
-    if (existing) {
-      if (existing.parentElement !== container) {
-        if (existing.parentElement) existing.parentElement.removeChild(existing);
-        container.appendChild(existing);
+    var m = findMount(modal);
+    if (!m || !m.container) return; // 还没渲染好，下一轮再试
+    var host = existing;
+    if (!host) {
+      try {
+        buildUi(m.container);
+        host = document.getElementById(HOST_ID);
+      } catch (e) {
+        return;
       }
-      return;
     }
+    // 放到正确位置（最后一个选项之后）
     try {
-      buildUi(container);
-    } catch (e) {}
+      if (m.after && m.after.parentElement === m.container) {
+        if (host.parentElement !== m.container || host.nextSibling !== m.after.nextSibling) {
+          m.container.insertBefore(host, m.after.nextSibling);
+        }
+      } else if (host.parentElement !== m.container) {
+        m.container.appendChild(host);
+      }
+    } catch (e) {
+      try {
+        m.container.appendChild(host);
+      } catch (e2) {}
+    }
   }
 
   function scheduleUi() {
@@ -375,7 +435,7 @@
       pageHost: pageHost,
       lanOrigin: lanOrigin,
       enabled: enabled,
-      onDeploy: isDeployPage(),
+      onDeploy: !!getInstallModal(),
       rendered: !!document.getElementById(HOST_ID),
     };
     // 排查用：在控制台输入 __WB_LAN_READY__ 就能看到它到底有没有跑起来、挂在哪
