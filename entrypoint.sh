@@ -36,6 +36,26 @@ EOF
 map $host $wb_redirect_lan { default 0; }
 map $host $wb_lan_authority { default ""; }
 EOF
+    # 勾选框模式（KOMARI_LAN_TOGGLE=1）：把内网地址传给前端。
+    # 内网地址是启动时探测的容器 IP，每家部署各自不同——镜像里零写死。
+    if [ "${KOMARI_LAN_TOGGLE:-0}" = "1" ]; then
+        detect_host
+        dbg_flag=""
+        [ "${KOMARI_LAN_DEBUG:-0}" = "1" ] && dbg_flag='\"debug\":1,'
+        if [ -n "$lan_host" ]; then
+            lan_port="${KOMARI_LAN_PORT:-80}"
+            lan_scheme="http"
+            [ "$lan_port" = "443" ] && lan_scheme="https"
+            wb_boot="{$dbg_flag\\\"lanOrigin\\\":\\\"$lan_scheme://$lan_host:$lan_port\\\",\\\"toggle\\\":1}"
+            echo "[entrypoint] 勾选框模式：内网地址 $lan_scheme://$lan_host:$lan_port"
+        else
+            wb_boot="{$dbg_flag\\\"toggle\\\":1}"
+            echo "[entrypoint] KOMARI_LAN_TOGGLE=1 但没探测到容器 IPv4，勾选框地址回退为当前访问地址" >&2
+        fi
+    else
+        wb_boot="{}"
+    fi
+    printf 'map $host $wb_boot { default "%s"; }\n' "$wb_boot" >> "$LAN_CONF"
     rest="$payload"
     idx=0
     refs=""
@@ -51,11 +71,15 @@ EOF
 map \$host \$wb_inject { default "$refs"; }
 
 sub_filter_once on;
-sub_filter '</body>' '<script>(function(){try{var b="\$wb_inject";var c=new TextDecoder().decode(Uint8Array.from(atob(b),function(k){return k.charCodeAt(0)}));var s=document.createElement("script");s.textContent=c;document.body.appendChild(s);}catch(e){}})();</script></body>';
+sub_filter '</body>' '<script>window.__WB_LAN__=\$wb_boot;</script><script>(function(){try{var b="\$wb_inject";var c=new TextDecoder().decode(Uint8Array.from(atob(b),function(k){return k.charCodeAt(0)}));var s=document.createElement("script");s.textContent=c;document.body.appendChild(s);}catch(e){}})();</script></body>';
 # 上游如果 gzip，sub_filter 改不了，这里统一要明文
 proxy_set_header Accept-Encoding "";
 EOF
-    echo "[entrypoint] 已注入：安装命令按当前访问地址自动改写（无 UI）"
+    if [ "${KOMARI_LAN_TOGGLE:-0}" = "1" ]; then
+        echo "[entrypoint] 已注入：勾选框（一键部署指令弹窗的安装选项里）+ 命令自动改写"
+    else
+        echo "[entrypoint] 已注入：安装命令按当前访问地址自动改写（无 UI）"
+    fi
 }
 
 # 可选增强：内网域名访问时 302 跳转到容器地址（同样无 UI）

@@ -157,6 +157,8 @@ jobs:
     if: needs.build.result == 'success'
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - name: Login to Docker Hub（避免 runner 共享出口被匿名限流）
         uses: docker/login-action@v3
         with:
@@ -246,7 +248,7 @@ jobs:
             echo "::error::IP 访问被误跳转"; exit 1
           fi
 
-          echo "=== 无 UI 模式（不设 KOMARI_LAN_AUTO：不跳转、首页注入自动改写脚本）"
+          echo "=== 静默模式（不设 KOMARI_LAN_TOGGLE）：不渲染控件、只改命令"
           docker rm -f ktoggle >/dev/null 2>&1 || true
           diag() {
             echo "::error::$1 | logs=$(docker logs ktoggle --tail=25 2>&1 | tr '\n' '|' | cut -c1-900) | ngx=$(docker exec ktoggle nginx -t 2>&1 | tr '\n' '|' | cut -c1-600)"
@@ -257,18 +259,18 @@ jobs:
             -e ADMIN_PASSWORD=test-only-not-a-secret \
             -v /tmp/default.conf:/etc/nginx/http.d/default.conf:ro \
             "$IMAGE" 2>&1); then
-            echo "::error::无 UI 模式容器启动失败: $(echo "$TROUT" | tr '\n' ' ')"
+            echo "::error::静默模式容器启动失败: $(echo "$TROUT" | tr '\n' ' ')"
             exit 1
           fi
           sleep 15
           TIP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' ktoggle)
           if ! TNG=$(docker exec ktoggle nginx -t 2>&1); then
-            diag "无 UI 模式 nginx -t 失败"; docker rm -f ktoggle; exit 1
+            diag "静默模式 nginx -t 失败"; docker rm -f ktoggle; exit 1
           fi
           echo "$TNG"
           if ! PAGE=$(curl -sL --retry 6 --retry-connrefused --retry-delay 3 \
                        -H 'Host: panel.example.com' "http://$TIP/"); then
-            diag "无 UI 模式首页取不到（容器 IP=$TIP）"; docker rm -f ktoggle; exit 1
+            diag "静默模式首页取不到（容器 IP=$TIP）"; docker rm -f ktoggle; exit 1
           fi
           # 注入标记：entrypoint 在 </body> 前塞了 <script>var b="..."</script>，里面是 base64 后的脚本
           if ! echo "$PAGE" | grep -q 'var b="'; then
@@ -279,24 +281,70 @@ jobs:
           if [ -z "$JS" ]; then
             diag "注入的 base64 解不回来（分块拼接可能出错）"; docker rm -f ktoggle; exit 1
           fi
-          # 必须是「安装命令自动改写」这一版
-          if ! echo "$JS" | grep -q 'autoRewrite'; then
-            diag "注入的不是自动改写版（缺 autoRewrite 标记）"; docker rm -f ktoggle; exit 1
+          # 静默模式：boot 必须是空对象，前端才不会渲染任何东西
+          if ! BOOT=$(docker exec ktoggle grep -F '$wb_boot' /etc/nginx/http.d/00-lan.conf); then
+            diag "00-lan.conf 里没有 boot 定义"; docker rm -f ktoggle; exit 1
           fi
-          if ! echo "$JS" | grep -q -e '--endpoint'; then
-            diag "自动改写脚本里没有 --endpoint 改写逻辑"; docker rm -f ktoggle; exit 1
+          echo "boot: $BOOT"
+          if ! echo "$BOOT" | grep -qF 'default "{}"'; then
+            diag "静默模式的 boot 不是空对象（会渲染出控件）"; docker rm -f ktoggle; exit 1
           fi
-          # 硬要求：前端不能出现任何开关控件（不得有 shadow root / 宿主节点 / 造元素）
-          if echo "$JS" | grep -qE 'attachShadow|wb-lan-host|createElement\("(div|button|input|label|section)"\)'; then
-            diag "注入脚本里还留着 UI 控件，前端会看见"; docker rm -f ktoggle; exit 1
-          fi
+          # 脚本里必须有改写逻辑（---endpoint / -e 都要认）
+          for M in '__WB_LAN__' '--endpoint' 'targetOrigin' 'install\.(sh|ps1)'; do
+            if ! echo "$JS" | grep -q "$M"; then
+              diag "注入脚本缺关键逻辑：$M"; docker rm -f ktoggle; exit 1
+            fi
+          done
+          echo "$JS" > /tmp/lan-toggle.js
           TOUT=$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' \
                  -H 'Host: panel.example.com' -H 'Accept: text/html' "http://$TIP/")
-          echo "无 UI 模式: $TOUT"
+          echo "静默模式: $TOUT"
           if echo "$TOUT" | grep -q '10\.9\.9\.9'; then
             diag "没开 KOMARI_LAN_AUTO 却发生了跳转，实际 $TOUT"; docker rm -f ktoggle; exit 1
           fi
           docker rm -f ktoggle >/dev/null 2>&1 || true
+
+          echo "=== 勾选框模式（KOMARI_LAN_TOGGLE=1）：boot 里带内网地址与开关标记"
+          docker rm -f ktog2 >/dev/null 2>&1 || true
+          if ! K2OUT=$(docker run -d --name ktog2 \
+            -e TUNNEL_TOKEN=0000000000000000000000000000000000000000000000000000000000000000 \
+            -e ADMIN_USERNAME=admin \
+            -e ADMIN_PASSWORD=test-only-not-a-secret \
+            -e KOMARI_LAN_TOGGLE=1 \
+            -e KOMARI_LAN_HOST=10.9.9.9 \
+            -e KOMARI_LAN_PORT=25774 \
+            -v /tmp/default.conf:/etc/nginx/http.d/default.conf:ro \
+            "$IMAGE" 2>&1); then
+            echo "::error::勾选框模式容器启动失败: $(echo "$K2OUT" | tr '\n' ' ')"
+            exit 1
+          fi
+          sleep 15
+          if ! B2=$(docker exec ktog2 grep -F '$wb_boot' /etc/nginx/http.d/00-lan.conf 2>&1); then
+            echo "::error::勾选框模式没生成 boot: $(echo "$B2" | tr '\n' ' ')"; docker rm -f ktog2; exit 1
+          fi
+          echo "boot: $B2"
+          for M in 'lanOrigin' '10.9.9.9:25774' 'toggle'; do
+            if ! echo "$B2" | grep -qF "$M"; then
+              echo "::error::勾选框模式 boot 缺 $M"; docker rm -f ktog2; exit 1
+            fi
+          done
+          # 镜像里内置的那份 JS 必须和页面注入的一致（分块注入不许漏字节）
+          H1=$(echo "$JS" | sha256sum | cut -d' ' -f1)
+          H2=$(docker exec ktog2 sha256sum /usr/local/share/wb/lan-toggle.js 2>/dev/null | cut -d' ' -f1)
+          echo "页面注入 JS sha256=$H1  镜像内 JS sha256=$H2"
+          if [ -z "$H2" ] || [ "$H1" != "$H2" ]; then
+            echo "::error::镜像内 JS 与页面注入的不一致（分块注入漏了内容）"
+            docker rm -f ktog2; exit 1
+          fi
+          if ! docker exec ktog2 nginx -t 2>&1; then
+            echo "::error::勾选框模式 nginx -t 失败"; docker rm -f ktog2; exit 1
+          fi
+          docker rm -f ktog2 >/dev/null 2>&1 || true
+
+          echo "=== 前端行为（jsdom 跑 tests/lan-toggle.test.js，用镜像里那份 JS）"
+          npm i --no-save --silent jsdom >/dev/null 2>&1
+          node tests/lan-toggle.test.js /tmp/lan-toggle.js
+          echo "前端行为测试通过"
 
           echo "=== 内置 acme.sh（签发/续期在镜像里，不再需要单独的 acme 容器）"
           if ! docker exec ksmoke test -x /acme.sh/acme.sh; then

@@ -1,1 +1,10 @@
 *.log
+
+# 只有本地调试才用，不进仓库
+node_modules/
+package.json
+package-lock.json
+dist/
+
+# 调试截图
+*.png

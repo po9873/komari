@@ -1,21 +1,41 @@
 /*
- * 镜像内置：安装命令自动改用「当前访问面板的地址」
- * 由 nginx 在返回面板页面时注入（sub_filter），不需要浏览器插件，也不渲染任何 UI。
+ * 镜像内置：安装命令的内网地址支持。
  *
- * 行为：扫描页面里的安装命令（含 install.sh / install.ps1 / komari-agent / --endpoint），
- *       把其中的面板地址（下载 URL 与 --endpoint 参数）整体替换为 location.origin
- *       ——也就是你此刻打开面板用的那个地址。
+ * 两种模式（由 entrypoint 注入的 window.__WB_LAN__.toggle 决定）：
  *
- * 效果：
- *   - 用内网 IP / 内网域名访问面板 -> 复制出的安装命令用内网地址，agent 直连、不绕 Cloudflare
- *   - 用公网域名访问面板         -> 复制出的安装命令用公网域名
+ * 1. KOMARI_LAN_TOGGLE=1（勾选框模式）
+ *    「一键部署指令」弹窗的「安装选项」末尾出现一条勾选项：
+ *        ☑ 安装命令用内网地址（http://<容器内网IP>:<端口>）
+ *    - 只在弹窗里存在，弹窗关了就随之消失，其它页面绝不渲染
+ *    - 用内网 IP / localhost 打开面板时默认勾上，公网域名打开默认不勾、可手动勾
+ *    - 勾上后：命令框里的面板地址实时换成内网地址（agent 直连、不绕 Cloudflare），
+ *      点「复制」拿到的内容同样已改写；取消勾选原样还原
+ *    - 内网地址是 entrypoint 启动时探测的容器 IP，每家部署各自不同，镜像里零写死
  *
- * 不渲染任何控件，不暴露内网 IP，不影响页面其它内容；找不到安装命令时什么都不做。
+ * 2. 未开开关（静默模式）
+ *    不渲染任何控件，把安装命令的面板地址自动换成「当前访问面板用的地址」。
+ *
+ * 关键实现细节（历代踩坑）：
+ *   a) Komari 的安装命令在 <textarea> 的 value 里，不是文本节点——
+ *      TreeWalker 扫文本节点永远扫不到，必须直接写 value。
+ *   b) 弹窗是 Radix Dialog（position:fixed），元素 offsetParent 恒为 null，
+ *      可见性判断必须用 getBoundingClientRect。
+ *   c) 光写 textarea.value 不够：React 下一次重渲染会用自己 state 里的原命令
+ *      把 DOM 值盖回去（表现为「勾上了但命令没变/又变回原样」）。
+ *      所以要在 textarea 元素上劫持 value 的 setter：React 每次回写都被
+ *      我们拦下，改写后再落到 DOM，原始命令单独记在 __wbBox.orig 里。
  */
 (function () {
   "use strict";
 
-  var lanOrigin = location.origin; // 你当前打开面板用的地址
+  var boot = window.__WB_LAN__ || {};
+  var lanOrigin = (boot.lanOrigin || "").replace(/\/+$/, "");
+  var toggleMode = !!boot.toggle;
+  var DEBUG = !!boot.debug;
+  var STORE_KEY = "wb_lan_toggle";
+  var TA_DESC = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value");
+
+  /* ---------- 命令识别与地址改写 ---------- */
 
   function isCommand(text) {
     if (!text) return false;
@@ -23,67 +43,295 @@
       text.indexOf("install.sh") !== -1 ||
       text.indexOf("install.ps1") !== -1 ||
       text.indexOf("komari-agent") !== -1 ||
-      text.indexOf("--endpoint") !== -1
+      text.indexOf("--endpoint") !== -1 ||
+      /(?:^|\s)-e\s+https?:\/\//.test(text)
     );
   }
 
-  // 把命令里的面板地址整体换成当前访问地址（下载 URL 与 --endpoint 一起换）
-  function rewrite(text) {
+  // Komari 实际命令用 `-e`（Linux/macOS/Windows）或 `--endpoint`，两种都要认。
+  // 兜底找面板地址时必须排除「下载安装脚本的 URL」（GitHub 的，绝不能改）。
+  function findPanelOrigin(text, urls) {
+    var m = text.match(/(?:^|\s)(?:--endpoint|-e)\s+(https?:\/\/[^\s"'<>]+)/i);
+    if (m) return m[1];
+    for (var i = 0; i < urls.length; i++) {
+      var u = urls[i];
+      if (/install\.(sh|ps1)/i.test(u)) continue;
+      if (/github|gitee|gitlab|ghproxy|jsdelivr/i.test(u)) continue;
+      return u;
+    }
+    return null;
+  }
+
+  function rewrite(text, target) {
     if (!text) return text;
     var urls = text.match(/https?:\/\/[^\s"'<>]+/g);
     if (!urls || !urls.length) return text;
-    var m = text.match(/--endpoint\s+(https?:\/\/[^\s"'<>]+)/i);
-    var panelOrigin = (m ? m[1] : urls[0]).replace(/\/+$/, "");
-    var target = lanOrigin.replace(/\/+$/, "");
-    if (panelOrigin === target) return text;
+    var found = findPanelOrigin(text, urls);
+    if (!found) return text;
+    var panelOrigin = found.replace(/\/+$/, "");
+    target = (target || "").replace(/\/+$/, "");
+    if (!target || panelOrigin === target) return text;
     var esc = panelOrigin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     return text.replace(new RegExp(esc, "g"), target);
   }
 
-  function patchTextNode(node) {
-    var value = node.nodeValue;
-    if (!value || !isCommand(value)) return;
-    var next = rewrite(value);
-    if (next === value) return;
-    node.nodeValue = next;
+  function targetOrigin() {
+    return lanOrigin || location.origin;
   }
 
-  function pass() {
+  /* ---------- 可见性：弹窗是 position:fixed，offsetParent 恒为 null ---------- */
+
+  function visible(el) {
+    if (!el) return false;
+    var r = el.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) return false;
+    var cs = getComputedStyle(el);
+    return cs.display !== "none" && cs.visibility !== "hidden";
+  }
+
+  /* ---------- 状态与调试日志 ---------- */
+
+  var state = { checked: null, row: null, log: [] };
+
+  function slog(msg, v) {
+    if (!DEBUG) return;
     try {
-      var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
-      var n;
-      while ((n = walker.nextNode())) patchTextNode(n);
+      state.log.push(msg + " chk=" + state.checked + " v=" + (v || "").slice(-28));
+      if (state.log.length > 28) state.log.shift();
     } catch (e) {}
   }
 
-  // 复制时同步改写剪贴板内容
-  document.addEventListener("copy", function (e) {
-    if (!e.clipboardData) return;
-    var sel = window.getSelection();
-    var picked = sel ? sel.toString() : "";
-    if (!isCommand(picked)) return;
-    var out = rewrite(picked);
-    if (out === picked) return;
-    e.clipboardData.setData("text/plain", out);
-    e.preventDefault();
-  }, true);
+  /* ---------- textarea：劫持 value setter，React 回写也逃不掉 ---------- */
 
-  function boot() {
+  function taBox(ta) {
+    if (ta.__wbBox) return ta.__wbBox;
+    var box = {
+      ta: ta,
+      orig: TA_DESC.get.call(ta), // 面板自己给的原始命令
+      write: function (v) {
+        TA_DESC.set.call(ta, v); // 我们自己的写入，不走拦截，避免污染 orig
+      },
+    };
+    try {
+      Object.defineProperty(ta, "value", {
+        configurable: true,
+        get: function () {
+          return TA_DESC.get.call(ta);
+        },
+        set: function (v) {
+          box.orig = v; // React 回填的一定是面板原始命令
+          var out = state.checked ? rewrite(v, targetOrigin()) : v;
+          TA_DESC.set.call(ta, out);
+          if (out !== v) slog("trap", out);
+        },
+      });
+    } catch (e) {}
+    ta.__wbBox = box;
+    return box;
+  }
+
+  function applyAll(dlg) {
+    var tas = dlg.querySelectorAll("textarea");
+    for (var i = 0; i < tas.length; i++) {
+      var box = taBox(tas[i]);
+      var want = state.checked ? rewrite(box.orig, targetOrigin()) : box.orig;
+      if (TA_DESC.get.call(tas[i]) !== want) {
+        box.write(want);
+        slog("apply", want);
+      }
+    }
+  }
+
+  function getDialog() {
+    var list = document.querySelectorAll(".rt-BaseDialogContent");
+    for (var i = list.length - 1; i >= 0; i--) {
+      if (visible(list[i]) && list[i].querySelector("textarea")) return list[i];
+    }
+    return null;
+  }
+
+  /* ---------- 静默模式：不渲染控件，只把地址换成当前访问地址 ---------- */
+
+  function silentPass() {
+    var i, box;
+    try {
+      var tas = document.querySelectorAll("textarea");
+      for (i = 0; i < tas.length; i++) {
+        if (!visible(tas[i])) continue;
+        box = taBox(tas[i]);
+        var want = rewrite(box.orig, location.origin.replace(/\/+$/, ""));
+        if (TA_DESC.get.call(tas[i]) !== want) box.write(want);
+      }
+    } catch (e) {}
+    try {
+      var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+      var n,
+        target = location.origin.replace(/\/+$/, "");
+      while ((n = walker.nextNode())) {
+        var value = n.nodeValue;
+        if (!value || !isCommand(value)) continue;
+        var next = rewrite(value, target);
+        if (next !== value) n.nodeValue = next;
+      }
+    } catch (e) {}
+  }
+
+  /* ---------- 勾选框模式 ---------- */
+
+  function defaultChecked() {
+    try {
+      var v = localStorage.getItem(STORE_KEY);
+      if (v === "1") return true;
+      if (v === "0") return false;
+    } catch (e) {}
+    var h = location.hostname;
+    return (
+      /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(h) ||
+      /\.(local|lan|internal)$/i.test(h)
+    );
+  }
+
+  function applyCheck(btn) {
+    btn.setAttribute("aria-checked", state.checked ? "true" : "false");
+    btn.setAttribute("data-state", state.checked ? "checked" : "unchecked");
+  }
+
+  function ensureRow(dlg) {
+    if (state.row && dlg.contains(state.row)) return true;
+    state.row = null;
+    var labels = dlg.querySelectorAll("label");
+    var grid = null;
+    for (var i = 0; i < labels.length; i++) {
+      if (labels[i].textContent.trim() === "安装选项") {
+        grid = labels[i].nextElementSibling;
+        break;
+      }
+    }
+    if (!grid) return false;
+
+    var row = document.createElement("div");
+    row.className = "rt-Flex rt-r-ai-center rt-r-gap-2";
+    row.style.gridColumn = "1 / -1";
+    row.setAttribute("data-wb-lan", "1");
+
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.setAttribute("role", "checkbox");
+    btn.className =
+      "rt-reset rt-BaseCheckboxRoot rt-CheckboxRoot rt-r-size-2 rt-variant-surface";
+
+    var lab = document.createElement("label");
+    lab.className = "text-sm font-normal";
+    lab.style.cursor = "pointer";
+    lab.textContent = "安装命令用内网地址（" + targetOrigin() + "）";
+
+    row.appendChild(btn);
+    row.appendChild(lab);
+    grid.appendChild(row);
+
+    function flip() {
+      state.checked = !state.checked;
+      applyCheck(btn);
+      try {
+        localStorage.setItem(STORE_KEY, state.checked ? "1" : "0");
+      } catch (e) {}
+      slog(state.checked ? "click->ON" : "click->OFF", "");
+      applyAll(dlg);
+    }
+
+    btn.addEventListener("click", function (e) {
+      e.preventDefault();
+      flip();
+    });
+    lab.addEventListener("click", function (e) {
+      e.preventDefault();
+      flip();
+    });
+
+    state.row = row;
+    applyCheck(btn);
+    return true;
+  }
+
+  function togglePass() {
+    var dlg = getDialog();
+    if (!dlg) {
+      state.row = null; // 弹窗关了：控件随 DOM 消失，只保留勾选状态
+      return;
+    }
+    if (state.checked === null) state.checked = defaultChecked();
+    if (!ensureRow(dlg)) return;
+    applyAll(dlg);
+  }
+
+  /* ---------- 复制拦截：剪贴板 API + copy 事件双保险 ---------- */
+
+  function hookClipboard() {
+    try {
+      if (!navigator.clipboard || navigator.clipboard.__wbHooked) return;
+      var orig = navigator.clipboard.writeText.bind(navigator.clipboard);
+      navigator.clipboard.writeText = function (t) {
+        try {
+          var on = toggleMode ? state.checked : true;
+          if (on && isCommand(t)) {
+            var out = rewrite(t, toggleMode ? targetOrigin() : location.origin);
+            if (out !== t) return orig(out);
+          }
+        } catch (e) {}
+        return orig(t);
+      };
+      navigator.clipboard.__wbHooked = true;
+    } catch (e) {}
+  }
+
+  document.addEventListener(
+    "copy",
+    function (e) {
+      try {
+        if (!e.clipboardData) return;
+        var on = toggleMode ? state.checked : true;
+        if (!on) return;
+        var picked = window.getSelection ? window.getSelection().toString() : "";
+        if (!isCommand(picked)) return;
+        var target = toggleMode ? targetOrigin() : location.origin;
+        var out = rewrite(picked, target);
+        if (out !== picked) {
+          e.clipboardData.setData("text/plain", out);
+          e.preventDefault();
+        }
+      } catch (err) {}
+    },
+    true
+  );
+
+  /* ---------- 启动 ---------- */
+
+  function bootFn() {
+    hookClipboard();
+    var pass = toggleMode ? togglePass : silentPass;
     pass();
-    setInterval(pass, 2000);
+    setInterval(pass, toggleMode ? 600 : 1500);
     try {
       new MutationObserver(pass).observe(document.documentElement, {
         childList: true,
         subtree: true,
+        attributes: true,
+        attributeFilter: ["data-state", "value"],
       });
     } catch (e) {}
-    // 调试用：确认脚本已注入、当前生效的访问地址
-    window.__WB_LAN__ = { lanOrigin: lanOrigin, autoRewrite: true };
+    if (DEBUG) {
+      window.__WB_LAN_READY__ = {
+        lanOrigin: lanOrigin || null,
+        toggle: toggleMode,
+        href: location.href,
+        dbg: state,
+      };
+    }
   }
 
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", boot);
+    document.addEventListener("DOMContentLoaded", bootFn);
   } else {
-    boot();
+    bootFn();
   }
 })();
