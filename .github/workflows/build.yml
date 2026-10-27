@@ -447,9 +447,8 @@ jobs:
           docker rm -f kacme >/dev/null 2>&1 || true
 
           echo "=== ACME 域名自动识别（不填任何域名变量）"
-          cat > /tmp/cf.log <<'CFLOG'
-2026-10-27T12:24:16Z INF Updated to new configuration config="{\"ingress\":[{\"hostname\":\"panel.example.com\", \"service\":\"http://localhost:80\"}, {\"service\":\"http_status:404\"}], \"warp-routing\":{\"enabled\":false}}" version=1
-CFLOG
+          # 假造一条 cloudflared 的远端配置日志；真机上它连上 CF 后会自动打这行
+          printf '%s\n' '2026-10-27T12:24:16Z INF Updated to new configuration config="{\"ingress\":[{\"hostname\":\"panel.example.com\", \"service\":\"http://localhost:80\"}, {\"service\":\"http_status:404\"}], \"warp-routing\":{\"enabled\":false}}" version=1' > /tmp/cf.log
           docker rm -f kacme2 >/dev/null 2>&1 || true
           if ! KA2=$(docker run -d --name kacme2 \
             -e TUNNEL_TOKEN=0000000000000000000000000000000000000000000000000000000000000000 \
