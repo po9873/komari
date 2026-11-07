@@ -229,6 +229,11 @@ jobs:
           echo "=== 进程"
           docker exec ksmoke sh -c 'ps | grep -E "komari|nginx|cloudflared" | grep -v grep' || true
 
+          echo "=== 时区（应为 +0800，推送消息时间依赖它）"
+          TZOUT=$(docker exec ksmoke date +%z)
+          echo "$TZOUT"
+          [ "$TZOUT" = "+0800" ] || { echo "::error::容器时区不是 Asia/Shanghai，实际 $TZOUT"; exit 1; }
+
           IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' ksmoke)
           echo "容器 IP: $IP"
 
