@@ -37,7 +37,7 @@ EXPOSE 25775 80 443
 
 ENV KOMARI_LISTEN=127.0.0.1:25775
 
-# 不设就是 UTC，komari 推送消息里的时间会慢 8 小时；compose 里可用 TZ=... 覆盖
-ENV TZ=Asia/Shanghai
+# 时区不在镜像里定死：tzdata 已安装，部署时按需传 TZ（如 Asia/Shanghai）。
+# 不传则为容器默认的 UTC。
 
 ENTRYPOINT ["/entrypoint.sh"]

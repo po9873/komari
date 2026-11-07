@@ -73,6 +73,7 @@ services:
       ADMIN_USERNAME: admin
       ADMIN_PASSWORD: <管理员密码>
       TUNNEL_TOKEN: <隧道 Token>
+      TZ: <本地时区>              # 例：Asia/Shanghai
       GODEBUG: disablethp=1
 ```
 
@@ -112,6 +113,7 @@ docker logs komari 2>&1 | grep acme               # 看签发/续期过程
 |---|---|---|
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | — | 首次启动创建的管理员 |
 | `TUNNEL_TOKEN` | — | cloudflared 隧道 Token，必填 |
+| `TZ` | `UTC` | 本地时区，镜像不预设；通知消息的时间按它格式化 |
 | `KOMARI_ACME_ENABLED` | `auto` | `auto`＝nginx 引用了 `/certs` 就签；`0` 关闭 |
 | `KOMARI_ACME_DOMAIN` | 自动识别 | 固定域名时才填 |
 | `KOMARI_ACME_EMAIL` | 空 | CA 到期提醒邮箱 |
